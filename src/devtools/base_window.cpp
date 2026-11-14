@@ -4,11 +4,19 @@ bool BaseWindow::IsOpen() {
     return open;
 }
 
-BaseWindow::BaseWindow(int width, int height) {
+void BaseWindow::Raise() {
+    SDL_RaiseWindow(window);
+}
+
+bool BaseWindow::OwnsWindow(Uint32 windowID) {
+    return SDL_GetWindowID(window) == windowID;
+}
+
+BaseWindow::BaseWindow(const char* title, int width, int height, Uint32 flags) {
     open = true;
-    window = SDL_CreateWindow("",
+    window = SDL_CreateWindow(title,
 		SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-	 	width, height, 0);
+	 	width, height, flags);
 }
 
 BaseWindow::~BaseWindow() {

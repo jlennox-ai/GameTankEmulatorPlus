@@ -19,6 +19,7 @@
 
 #include "joystick_adapter.h"
 #include "audio_coprocessor.h"
+#include "save_state.h"
 #include "blitter.h"
 #include "palette.h"
 
@@ -32,6 +33,8 @@
 #include "devtools/memory_map.h"
 #include "devtools/breakpoints.h"
 #include "devtools/source_map.h"
+#include "devtools/source_stepper.h"
+#include "devtools/variable_map.h"
 
 #include "ui/ui_utils.h"
 #include "devtools/profiler.h"
@@ -98,14 +101,32 @@ bool frameFlipProfileArmed = false;
 bool frameFlipProfileRunning = false;
 int frameFlipProfileVsyncLimit = MAX_FRAME_FLIP_PROFILE_VSYNCS;
 
+// A vsync NMI that came due while the CPU was stopped (at a breakpoint or the end of a step):
+// raised when it runs again, so a stop never lands in the NMI handler by itself.
+bool vsyncNmiPending = false;
+
 bool showMenu = false;
 bool menuOpening = false;
+#ifdef WRAPPER_MODE
+const bool menuBarAlwaysShown = false;
+#else
+// The menu bar is always shown, with the game drawn below it (WRAPPER_MODE's Esc menu goes over
+// the game instead).
+const bool menuBarAlwaysShown = true;
+#endif
+// The menu bar and toolbar's height together, measured as they're drawn (0 until then, and
+// without them): the game is drawn below them.
+int topBarsHeight = 0;
+// Where refreshScreen last drew the game's viewport, for screenshots.
+SDL_Rect lastViewport = { 0, 0, 0, 0 };
 #define GRID_NONE 0
 #define GRID_25   1
 #define GRID_50   2
 #define GRID_FULL 3
 int grid_mode = GRID_NONE;
 int resetQueued = 0;
+// Ctrl+R: reload the ROM file (and its debug files) before the queued reset, to pick up a rebuild.
+bool reloadQueued = false;
 #define MUTE_SOURCE_MANUAL 1
 #define MUTE_SOURCE_MENU 2
 int muteMask = 0;
@@ -427,13 +448,18 @@ uint8_t MemoryRead(uint16_t address) {
 }
 
 uint8_t MemorySync(uint16_t address) {
-	if(timekeeper.clock_mode == CLOCKMODE_NORMAL) {
-		if(Breakpoints::checkBreakpoint(address, cartridge_state.bank_mask)) {
+	bool stepping = (timekeeper.clock_mode == CLOCKMODE_STEPSOURCE) || (timekeeper.clock_mode == CLOCKMODE_STEPOUT);
+	if((timekeeper.clock_mode == CLOCKMODE_NORMAL) || stepping) {
+		uint8_t opcode = MemoryReadResolve(address, false);
+		bool stop = Breakpoints::checkBreakpoint(address, cartridge_state.bank_mask);
+		if(stepping && SourceStepper::ShouldStop(address, cartridge_state.bank_mask, cpu_core->sp, opcode, MemoryReadResolve)) {
+			stop = true;
+		}
+		if(stop) {
 			timekeeper.clock_mode = CLOCKMODE_STOPPED;
 			Disassembler::Decode(MemoryReadResolve, loadedMemoryMap, address, 32);
 			cpu_core->Freeze();
 		}
-		uint8_t opcode = MemoryReadResolve(address, false);
 		if(opcode == 0x20) { //JSR
 			uint16_t jsr_dest = MemoryReadResolve(address+1, false) | (MemoryReadResolve(address+2, false) << 8);
 			profiler.LogJSR(address, cartridge_state.bank_mask, jsr_dest);
@@ -629,6 +655,153 @@ void randomize_memory() {
 	blitter->gram_mid_bits = rand() % 4;
 }
 
+// Redraws the VRAM viewer's copies of video and graphics RAM, after they change wholesale.
+void redraw_memory_surfaces() {
+	for(int i = 0; i < VRAM_BUFFER_SIZE; i ++) {
+		put_pixel32(vRAM_Surface, i & 127, i >> 7, Palette::ConvertColor(vRAM_Surface, system_state.vram[i]));
+	}
+	for(int i = 0; i < GRAM_BUFFER_SIZE; i ++) {
+		put_pixel32(gRAM_Surface, i & 127, i >> 7, Palette::ConvertColor(gRAM_Surface, system_state.gram[i]));
+	}
+}
+
+// Save states: one slot, <rom>.state next to the ROM. They hold the machine (RAM, video and
+// graphics RAM, the CPU, the blitter, the audio coprocessor, the cartridge's banking and save RAM
+// and the frame timing) but not the ROM itself, so a state loads onto a rebuilt ROM: handy for
+// trying a change from the same spot, though code that moved won't line up with the saved CPU.
+const char SAVE_STATE_MAGIC[8] = { 'G', 'T', 'S', 'T', 'A', 'T', 'E', '\0' };
+const uint32_t SAVE_STATE_VERSION = 1;
+
+std::string saveStatePath() {
+	std::filesystem::path path(currentRomFilePath);
+	path.replace_extension("state");
+	return path.string();
+}
+
+void serializeMachineState(StateFile& file) {
+	file.Value(system_state.dma_control);
+	file.Value(system_state.dma_control_irq);
+	file.Value(system_state.banking);
+	file.Value(system_state.ram);
+	file.Value(system_state.ram_initialized);
+	file.Value(system_state.vram);
+	file.Value(system_state.gram);
+	file.Value(system_state.VIA_regs);
+	file.Value(cartridge_state.bank_shifter);
+	file.Value(cartridge_state.bank_mask);
+	file.Value(cartridge_state.save_ram);
+	file.Value(cartridge_state.write_mode);
+	file.Value(timekeeper.totalCyclesCount);
+	file.Value(timekeeper.cycles_since_vsync);
+	file.Value(vsyncNmiPending);
+	cpu_core->SerializeState(file);
+	blitter->SerializeState(file);
+	soundcard->SerializeState(file);
+}
+
+// The header: what the state is, and the ROM size it was saved with (a state only fits a ROM
+// of the same size: the banking differs).
+void serializeSaveStateHeader(StateFile& file, char (&magic)[8], uint32_t& version, int& romSize) {
+	file.Value(magic);
+	file.Value(version);
+	file.Value(romSize);
+}
+
+void showSaveStateMessage(const std::string& message, bool failed) {
+	printf("%s\n", message.c_str());
+	std::string title = std::string(WINDOW_TITLE) + " | " + currentRomFilePath + " | " + message;
+	SDL_SetWindowTitle(mainWindow, title.c_str());
+#ifdef TINYFILEDIALOGS_H
+	if(failed) {
+		tinyfd_notifyPopup("Save state", message.c_str(), "warning");
+	}
+#endif
+}
+
+void saveState() {
+	if(currentRomFilePath.empty()) {
+		showSaveStateMessage("No ROM loaded to save the state of", true);
+		return;
+	}
+	std::vector<uint8_t> bytes;
+	StateFile file(StateFile::Mode::Save, bytes);
+	char magic[8];
+	std::memcpy(magic, SAVE_STATE_MAGIC, sizeof(magic));
+	uint32_t version = SAVE_STATE_VERSION;
+	int romSize = cartridge_state.size;
+	serializeSaveStateHeader(file, magic, version, romSize);
+	serializeMachineState(file);
+
+	std::string path = saveStatePath();
+	std::ofstream out(path, std::ios::binary | std::ios::trunc);
+	out.write((const char*) bytes.data(), bytes.size());
+	out.close();
+	if(!out) {
+		showSaveStateMessage("Couldn't write the state to " + path, true);
+		return;
+	}
+	showSaveStateMessage("state saved", false);
+}
+
+void loadState() {
+	if(currentRomFilePath.empty()) {
+		showSaveStateMessage("No ROM loaded to load a state into", true);
+		return;
+	}
+	std::string path = saveStatePath();
+	std::ifstream in(path, std::ios::binary);
+	if(!in) {
+		showSaveStateMessage("No saved state yet (" + path + ")", true);
+		return;
+	}
+	std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+
+	// Checked before anything is loaded, so a bad file leaves the machine as it was.
+	StateFile header(StateFile::Mode::Load, bytes);
+	char magic[8] = {};
+	uint32_t version = 0;
+	int romSize = 0;
+	try {
+		serializeSaveStateHeader(header, magic, version, romSize);
+	} catch(const std::runtime_error&) {
+		showSaveStateMessage(path + " isn't a save state", true);
+		return;
+	}
+	if(std::memcmp(magic, SAVE_STATE_MAGIC, sizeof(magic)) != 0) {
+		showSaveStateMessage(path + " isn't a save state", true);
+		return;
+	}
+	if(version != SAVE_STATE_VERSION) {
+		showSaveStateMessage(path + " is from another version of the emulator", true);
+		return;
+	}
+	if(romSize != cartridge_state.size) {
+		showSaveStateMessage(path + " was saved with a different size of ROM", true);
+		return;
+	}
+	// Every field has a fixed size, so the current state's size is the size a good file has.
+	std::vector<uint8_t> current;
+	StateFile measure(StateFile::Mode::Save, current);
+	serializeSaveStateHeader(measure, magic, version, romSize);
+	serializeMachineState(measure);
+	if(bytes.size() != current.size()) {
+		showSaveStateMessage(path + " is the wrong size for a save state", true);
+		return;
+	}
+
+	StateFile file(StateFile::Mode::Load, bytes);
+	serializeSaveStateHeader(file, magic, version, romSize);
+	serializeMachineState(file);
+	if(!file.AtEnd()) {
+		throw std::logic_error("a save state of the right size wasn't read to its end");
+	}
+	redraw_memory_surfaces();
+	if(timekeeper.clock_mode == CLOCKMODE_STOPPED) {
+		Disassembler::Decode(MemoryReadResolve, loadedMemoryMap, cpu_core->pc, 32);
+	}
+	showSaveStateMessage("state loaded", false);
+}
+
 extern "C" {
 void PauseEmulation() {
   paused = true;
@@ -668,6 +841,16 @@ const char * open_rom_dialog() {
 #endif
 }
 
+// Where a ROM's debug file (out.map, sourcemap.dbg) is: next to the ROM if it's there, else
+// in ../build, the GameTank SDK's project layout.
+static std::filesystem::path FindDebugFile(const std::filesystem::path& romPath, const char* name) {
+	std::filesystem::path besideRom = romPath.parent_path() / name;
+	if(std::filesystem::exists(besideRom)) {
+		return besideRom;
+	}
+	return romPath.parent_path() / "../build" / name;
+}
+
 extern "C" {
 	// Attempts to load a rom by filename into a buffer
 	// 0 on success
@@ -693,8 +876,8 @@ extern "C" {
 
 		gameconfig = new GameConfig(nvramPath.string().c_str());
 
-		std::filesystem::path defaultMemMapFilePath = filepath.parent_path().append("../build/out.map");
-		std::filesystem::path defaultSourceMapFilePath = filepath.parent_path().append("../build/sourcemap.dbg");
+		std::filesystem::path defaultMemMapFilePath = FindDebugFile(filepath, "out.map");
+		std::filesystem::path defaultSourceMapFilePath = FindDebugFile(filepath, "sourcemap.dbg");
 
 		if(std::filesystem::exists(defaultMemMapFilePath)) {
 			printf("found default memory map file location %s\n", defaultMemMapFilePath.c_str());
@@ -709,8 +892,20 @@ extern "C" {
 			printf("found default source map file location %s\n", defaultSourceMapFilePath.c_str());
 			std::string sourceMapPathString = defaultSourceMapFilePath.string();
 			SourceMap::singleton = new SourceMap(sourceMapPathString);
+			// Source line breakpoints follow their lines through edits and rebuilds.
+			if(Breakpoints::linkSourceBreakpoints(*SourceMap::singleton)) {
+				gameconfig->Save();
+			}
 		} else {
 			printf("default source map file %s not found\n", defaultSourceMapFilePath.c_str());
+		}
+
+		// The source view's variable hovers (written by llvm-mos builds; cc65 builds have none).
+		delete VariableMap::singleton;
+		VariableMap::singleton = nullptr;
+		std::filesystem::path variablesFilePath = FindDebugFile(filepath, "variables.dbg");
+		if(std::filesystem::exists(variablesFilePath)) {
+			VariableMap::singleton = new VariableMap(variablesFilePath.string());
 		}
 
 		printf("loading %s\n", filename);
@@ -781,8 +976,9 @@ extern "C" {
 	}
 
 	void takeScreenShot() {
-		SDL_Surface *screenshot = SDL_CreateRGBSurface(0, viewport_width(display_scale), viewport_height(display_scale), 32, 0x00ff0000, 0x0000ff00, 0x000000ff, 0xff000000);
-		SDL_RenderReadPixels(mainRenderer, NULL, SDL_PIXELFORMAT_ARGB8888, screenshot->pixels, screenshot->pitch);
+		// The game's viewport, not the menu bar above it.
+		SDL_Surface *screenshot = SDL_CreateRGBSurface(0, lastViewport.w, lastViewport.h, 32, 0x00ff0000, 0x0000ff00, 0x000000ff, 0xff000000);
+		SDL_RenderReadPixels(mainRenderer, &lastViewport, SDL_PIXELFORMAT_ARGB8888, screenshot->pixels, screenshot->pitch);
 		SDL_SaveBMP(screenshot, "screenshot.bmp");
 		SDL_FreeSurface(screenshot);
 	}
@@ -879,9 +1075,41 @@ void toggleVRAMWindow() {
 	}
 }
 
+// Memory the code stepper asked the memory browser to show (a clicked variable). It's shown
+// after the tool windows draw: the browser may need opening, which changes the list being drawn.
+bool memoryToShowPending = false;
+uint16_t memoryToShowAddress = 0;
+uint32_t memoryToShowSize = 0;
+
+void requestShowMemory(uint16_t address, uint32_t size) {
+	memoryToShowPending = true;
+	memoryToShowAddress = address;
+	memoryToShowSize = size;
+}
+
+void showRequestedMemory() {
+	if(!memoryToShowPending) {
+		return;
+	}
+	memoryToShowPending = false;
+	MemBrowserWindow* browser = nullptr;
+	for(BaseWindow* window : toolWindows) {
+		if(dynamic_cast<MemBrowserWindow*>(window) != nullptr) {
+			browser = dynamic_cast<MemBrowserWindow*>(window);
+		}
+	}
+	if(browser == nullptr) {
+		browser = new MemBrowserWindow(loadedMemoryMap, MemoryReadResolve, GetRAM, *gameconfig);
+		toolWindows.push_back(browser);
+	}
+	browser->ShowMemory(memoryToShowAddress, memoryToShowSize);
+	browser->Raise();
+}
+
 void toggleSteppingWindow() {
 	if(!toolTypeIsOpen<SteppingWindow>()) {
-		toolWindows.push_back(new SteppingWindow(timekeeper, loadedMemoryMap, cpu_core, *gameconfig, cartridge_state));
+		toolWindows.push_back(new SteppingWindow(timekeeper, loadedMemoryMap, cpu_core, *gameconfig, cartridge_state, MemoryReadResolve,
+			requestShowMemory));
 	} else {
 		closeToolByType<SteppingWindow>();
 	}
@@ -900,6 +1128,34 @@ void doRamDump() {
 	ofstream dumpfile ("ram_debug.dat", ios::out | ios::binary);
 	dumpfile.write((char*) system_state.ram, RAMSIZE);
 	dumpfile.close();
+}
+
+// Space and Pause stop the CPU, as a breakpoint does (the code stepper's Step and Continue
+// work from there), and start it again.
+void togglePause() {
+	bool pausing = (timekeeper.clock_mode != CLOCKMODE_STOPPED);
+	timekeeper.clock_mode = pausing ? CLOCKMODE_STOPPED : CLOCKMODE_NORMAL;
+	std::string title = std::string(WINDOW_TITLE) + " | " + currentRomFilePath + (pausing ? " | paused" : "");
+	SDL_SetWindowTitle(mainWindow, title.c_str());
+}
+
+bool isToolWindow(Uint32 windowID) {
+	for(BaseWindow* window : toolWindows) {
+		if(window->OwnsWindow(windowID)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// A key typed into a debugger window's text box (a breakpoint address, say) isn't a hotkey.
+bool isTypingInToolWindow(Uint32 windowID) {
+	for(BaseWindow* window : toolWindows) {
+		if(window->OwnsWindow(windowID) && window->IsTypingText()) {
+			return true;
+		}
+	}
+	return false;
 }
 
 void toggleControllerOptionsWindow() {
@@ -946,6 +1202,8 @@ HotkeyAssignment hotkeys[] = {
 	{&toggleMute, SDLK_m},
 #if !defined(WASM_BUILD) && !defined(WRAPPER_MODE)
 	{&doRamDump, SDLK_F6},
+	{&saveState, SDLK_F4},
+	{&loadState, SDLK_F5},
 	{&toggleSteppingWindow, SDLK_F7},
 	{&takeScreenShot, SDLK_F8},
 	{&toggleMemBrowserWindow, SDLK_F9},
@@ -968,6 +1226,38 @@ bool checkHotkey(SDL_Keycode  key) {
 #define EM_BOOL int
 #endif
 
+#if !defined(WASM_BUILD) && !defined(WRAPPER_MODE)
+// A toolbar button that opens and closes a tool window, drawn pressed while it's open.
+void toolbarButton(const char* label, const char* tooltip, bool open, void (*toggle)()) {
+	if(open) {
+		ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+	}
+	bool clicked = ImGui::Button(label);
+	if(open) {
+		ImGui::PopStyleColor();
+	}
+	if(ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("%s", tooltip);
+	}
+	if(clicked) {
+		toggle();
+	}
+	ImGui::SameLine();
+}
+
+// A toolbar button that does something once per click.
+void toolbarActionButton(const char* label, const char* tooltip, void (*action)()) {
+	bool clicked = ImGui::Button(label);
+	if(ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("%s", tooltip);
+	}
+	if(clicked) {
+		action();
+	}
+	ImGui::SameLine();
+}
+#endif
+
 void refreshScreen() {
 	SDL_Rect src, dest, viewport_dest;
 	int scr_w, scr_h;
@@ -976,6 +1266,7 @@ void refreshScreen() {
 	src.w = GT_WIDTH;
 	src.h = GT_HEIGHT;
 	SDL_GetWindowSize(mainWindow, &scr_w, &scr_h);
+	scr_h -= topBarsHeight;
 	int scale_h = scr_h / GT_HEIGHT;
 	int scale_w = (scr_w * VIEWPORT_ASPECT_H) / (GT_HEIGHT * VIEWPORT_ASPECT_W);
 	int scale = min(scale_h, scale_w);
@@ -983,7 +1274,8 @@ void refreshScreen() {
 	viewport_dest.w = viewport_width(scale);
 	viewport_dest.h = viewport_height(scale);
 	viewport_dest.x = (scr_w - viewport_dest.w) / 2;
-	viewport_dest.y = (scr_h - viewport_dest.h) / 2;
+	viewport_dest.y = topBarsHeight + (scr_h - viewport_dest.h) / 2;
+	lastViewport = viewport_dest;
 	dest.w = GT_WIDTH * scale;
 	dest.h = GT_HEIGHT * scale;
 	dest.x = viewport_dest.x + (viewport_dest.w - dest.w) / 2;
@@ -1031,9 +1323,11 @@ void refreshScreen() {
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
 	ImGui::NewFrame();
-	if(showMenu) {
+	if(menuBarAlwaysShown || showMenu) {
 #ifndef WRAPPER_MODE
+		int menu_height = 0;
 		if(ImGui::BeginMainMenuBar()) {
+			menu_height = (int) ImGui::GetWindowSize().y;
 			if (ImGui::BeginMenu("File")) {
 				if(ImGui::MenuItem("Open Rom")) {
 					const char* rom_file_name = open_rom_dialog();
@@ -1041,6 +1335,14 @@ void refreshScreen() {
 						LoadRomFile(rom_file_name);
 					}	
 				}
+				ImGui::Separator();
+				if(ImGui::MenuItem("Save State", "F4")) {
+					saveState();
+				}
+				if(ImGui::MenuItem("Load State", "F5")) {
+					loadState();
+				}
+				ImGui::Separator();
 				if(ImGui::MenuItem("Exit")) {
 					running = false;
 				}
@@ -1077,7 +1379,7 @@ void refreshScreen() {
 					ImGui::RadioButton("5x", &display_scale, 5);
 					ImGui::RadioButton("6x", &display_scale, 6);
 					if(display_scale != prev_scale && !isFullScreen) {
-						SDL_SetWindowSize(mainWindow, viewport_width(display_scale), viewport_height(display_scale));
+						SDL_SetWindowSize(mainWindow, viewport_width(display_scale), viewport_height(display_scale) + topBarsHeight);
 					}
 					ImGui::EndMenu();
 				}
@@ -1100,7 +1402,7 @@ void refreshScreen() {
 				if(ImGui::MenuItem("VRAM Viewer (F10)")) {
 					toggleVRAMWindow();
 				}
-				if(ImGui::MenuItem("Code Stepper (F7)")) {
+				if(ImGui::MenuItem("Debugger (F7)")) {
 					toggleSteppingWindow();
 				}
 				if(ImGui::MenuItem("Patching Window")) {
@@ -1131,6 +1433,46 @@ void refreshScreen() {
 				ImGui::EndMenu();
 			}
 			ImGui::EndMainMenuBar();
+		}
+
+		// The toolbar, under the menu bar: a button per tool window, drawn pressed while it's open.
+		ImGui::SetNextWindowPos(ImVec2(0, (float) menu_height));
+		// A height of 0 fits the buttons.
+		ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x, 0));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+		ImGui::PushStyleColor(ImGuiCol_WindowBg, ImGui::GetStyleColorVec4(ImGuiCol_MenuBarBg));
+		ImGui::Begin("Toolbar", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove
+			| ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus
+			| ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+		toolbarButton("Debugger", "Debugger (F7)", toolTypeIsOpen<SteppingWindow>(), toggleSteppingWindow);
+		toolbarButton("Memory", "Memory Browser (F9)", toolTypeIsOpen<MemBrowserWindow>(), toggleMemBrowserWindow);
+		toolbarButton("VRAM", "VRAM Viewer (F10)", toolTypeIsOpen<VRAMWindow>(), toggleVRAMWindow);
+		toolbarButton("Profiler", "Profiler (F12)", toolTypeIsOpen<ProfilerWindow>(), toggleProfilerWindow);
+		toolbarButton("Patching", "Patching Window", toolTypeIsOpen<PatchingWindow>(), togglePatchingWindow);
+		// The save state buttons, at the right end.
+		const ImGuiStyle& style = ImGui::GetStyle();
+		float right_buttons_width = ImGui::CalcTextSize("Save").x + ImGui::CalcTextSize("Load").x
+			+ (style.FramePadding.x * 4) + style.ItemSpacing.x;
+		// Never over the tool buttons, in a narrow window.
+		ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - right_buttons_width));
+		toolbarActionButton("Save", "Save State: to the ROM's .state file (F4)", saveState);
+		toolbarActionButton("Load", "Load State: from the ROM's .state file (F5)", loadState);
+		int toolbar_height = (int) ImGui::GetWindowSize().y;
+		ImGui::End();
+		ImGui::PopStyleColor();
+		ImGui::PopStyleVar(2);
+
+		int height = menu_height + toolbar_height;
+		if(height != topBarsHeight) {
+			// The window grows by the bars, so the game keeps its size below them.
+			int window_w, window_h;
+			SDL_GetWindowSize(mainWindow, &window_w, &window_h);
+			if(!isFullScreen) {
+				SDL_SetWindowSize(mainWindow, window_w, window_h + height - topBarsHeight);
+			}
+			SDL_SetWindowMinimumSize(mainWindow, viewport_width(MIN_DISPLAY_SCALE), viewport_height(MIN_DISPLAY_SCALE) + height);
+			topBarsHeight = height;
 		}
 #else
 		ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -1271,6 +1613,8 @@ else {
 #ifndef WASM_BUILD
 			switch(timekeeper.clock_mode) {
 				case CLOCKMODE_NORMAL:
+				case CLOCKMODE_STEPSOURCE:
+				case CLOCKMODE_STEPOUT:
 					cpu_core->freeze = false;
 					intended_cycles = timekeeper.cycles_per_vsync;
 					break;
@@ -1285,6 +1629,10 @@ else {
 					break;
 			}
 			if(intended_cycles) {
+				if(vsyncNmiPending) {
+					cpu_core->NMI();
+					vsyncNmiPending = false;
+				}
 				cpu_core->Run(intended_cycles, timekeeper.totalCyclesCount);
 			}
 #else
@@ -1352,13 +1700,21 @@ else {
 				timekeeper.frameCount++;
 			}
 #endif
+			// Running, a pass counts as the cycles asked for. Stopped part-way (a breakpoint, or
+			// the end of a step), only what ran counts, so vsync still comes at the right time
+			// while debugging.
+			uint64_t elapsed_cycles = (timekeeper.clock_mode == CLOCKMODE_STOPPED) ? timekeeper.actual_cycles : intended_cycles;
 			timekeeper.totalCyclesCount -= timekeeper.actual_cycles;
-			timekeeper.totalCyclesCount += intended_cycles;
-			timekeeper.cycles_since_vsync += intended_cycles;
+			timekeeper.totalCyclesCount += elapsed_cycles;
+			timekeeper.cycles_since_vsync += elapsed_cycles;
 			if(timekeeper.cycles_since_vsync >= timekeeper.cycles_per_vsync) {
 				timekeeper.cycles_since_vsync -= timekeeper.cycles_per_vsync;
 				if(system_state.dma_control & DMA_VSYNC_NMI_BIT) {
-					cpu_core->NMI();
+					if(timekeeper.clock_mode == CLOCKMODE_STOPPED) {
+						vsyncNmiPending = true;
+					} else {
+						cpu_core->NMI();
+					}
 					if(vsyncProfileArmed) {
 						profiler.DeepProfileStart();
 						vsyncProfileArmed = false;
@@ -1439,7 +1795,18 @@ else {
 				}
 
 			} else if((e.type == SDL_KEYDOWN) || (e.type == SDL_KEYUP)) {
-				if(e.key.repeat == 0) {
+				// A key typed into a debugger window's text box (a search, an address) is text, not a
+				// hotkey (R resets) or a game button. Key releases still go through, so a held button
+				// is let go.
+				// The same for a debugger window's own Ctrl shortcuts (the memory browser's Ctrl+C and
+				// Ctrl+G), all but Ctrl+R, which reloads the ROM from any window.
+				bool typedIntoToolWindow = false;
+	#ifndef WASM_BUILD
+				bool toolWindowShortcut = (e.key.keysym.mod & KMOD_CTRL) && (e.key.keysym.sym != SDLK_r)
+					&& isToolWindow(e.key.windowID);
+				typedIntoToolWindow = (e.type == SDL_KEYDOWN) && (isTypingInToolWindow(e.key.windowID) || toolWindowShortcut);
+	#endif
+				if((e.key.repeat == 0) && !typedIntoToolWindow) {
 					if((e.type == SDL_KEYUP) || !checkHotkey(e.key.keysym.sym)) {
 						switch(e.key.keysym.sym) {
 							case SDLK_LSHIFT:
@@ -1450,7 +1817,8 @@ else {
 								break;							
 							case SDLK_ESCAPE:
 	#if !defined(DISABLE_ESC)
-								if(e.type == SDL_KEYDOWN) {
+								// With the menu bar always shown, there's no menu to open.
+								if((e.type == SDL_KEYDOWN) && !menuBarAlwaysShown) {
 									showMenu = !showMenu;
 									menuOpening = showMenu;
 	#ifdef WRAPPER_MODE
@@ -1466,13 +1834,24 @@ else {
 							case SDLK_r:
 								//TODO add menu item for reset
 								if(e.type == SDL_KEYDOWN) {
-									if(lshift || rshift) {
+									if(e.key.keysym.mod & KMOD_CTRL) {
+										reloadQueued = true;
+										resetQueued = 2;
+									} else if(lshift || rshift) {
 										resetQueued = 2;
 									} else {
 										resetQueued = 1;
 									}
 								}
 								break;
+	#ifndef WASM_BUILD
+							case SDLK_SPACE:
+							case SDLK_PAUSE:
+								if(e.type == SDL_KEYDOWN) {
+									togglePause();
+								}
+								break;
+	#endif
 							case SDLK_o:
 								if(e.type == SDL_KEYDOWN) {
 									const char* rom_file_name = open_rom_dialog();
@@ -1523,7 +1902,7 @@ else {
 			}
         }
 
-		if(joysticks->CheckSystemButtonPressed()) {
+		if(joysticks->CheckSystemButtonPressed() && !menuBarAlwaysShown) {
 	#if !defined(DISABLE_ESC)
 									showMenu = !showMenu;
 									menuOpening = showMenu;
@@ -1548,6 +1927,7 @@ else {
 			delete w;
 		});
 		toolWindows.erase(to_be_removed, end(toolWindows));
+		showRequestedMemory();
 #endif
 		
 	if(!running) {
@@ -1570,6 +1950,16 @@ else {
 		SDL_DestroyWindow(mainWindow);
 	}
 
+	if(reloadQueued) {
+		reloadQueued = false;
+		// LoadRomFile takes the path by pointer and replaces currentRomFilePath.
+		std::string romFilePath = currentRomFilePath;
+		if(LoadRomFile(romFilePath.c_str()) == -1) {
+#ifdef TINYFILEDIALOGS_H
+			tinyfd_notifyPopup("Alert", "Couldn't reload the ROM", "warning");
+#endif
+		}
+	}
 	if(resetQueued) {
 		ResumeEmulation();
 		if(lshift || rshift || (resetQueued == 2)) {

@@ -1,112 +1,22 @@
-# GameTank Emulator
+# GameTank Emulator Plus
 
-An emulator project for the GameTank 8-bit game console, to speed cross-development of software for the real system.
+A fork of [clydeshaffer/GameTankEmulator](https://github.com/clydeshaffer/GameTankEmulator) with more debugging tools. See that repo for how to build and use the emulator.
 
-Powered by gianlucag's 6502 emulator library. (Forked to add some WDC 65C02 opcodes)
+![The emulator with its toolbar](docs/main-window.png)
 
-I mainly develop this on WSL Ubuntu cross-building to Windows, but native Linux and OSX are also supported.
-For setting up the build enviroment I uzed LazyFoo's directions: http://lazyfoo.net/tutorials/SDL/01_hello_SDL/index.php
+## Changes
 
-| ![displaying a whole sprite sheet](img/spritesheet.PNG) | ![a simple platform game scene](img/simplelevel.PNG) |
-|-----------------|--------------------|
+- **Source-level debugging**: Step src, Step over and Step out step by C source line, and run through interrupts.
+- **Variable hovers**: hover a variable in the Source tab to see its value. Structs, pointers, enums, bit-fields and array indexes (`g_well.Blocks[y][x]`) all work. Click one to show it in the memory browser. This needs a `variables.dbg` next to the ROM, written from the build's DWARF info.
+- **Breakpoints**: click the Source tab's margin to set one. Each one stays on its source line through edits and rebuilds. Click a breakpoint in the list to jump to its code.
+- **Memory browser**: go to an address or symbol (Ctrl+G), select and copy bytes (`aa bb cc`), and see the hovered byte's address and binary in a status bar. It remembers where it was scrolled.
+- **Save states**: F4 saves, F5 loads (one slot, `<rom>.state`).
+- **Ctrl+R** reloads the ROM and its debug files, so a rebuild shows up in the open emulator.
+- **Space/Pause** pauses and resumes.
+- **Menu bar and toolbar** are always shown.
+- **Tool windows** resize and remember their size and position.
+- Debug files (`out.map`, `sourcemap.dbg`) are found next to the ROM as well as in `../build`.
 
-## How to use:
-The emulator is meant to test the same ROM files that I'd normally flash to an EEPROM cartridge. You can start the emulator with a ROM file
-either from the command line eg. `./GameTankEmulator.exe conway.gtr` or by dragging the ROM to the executable in Windows Explorer.
+![The debugger stopped at a breakpoint, hovering a variable](docs/debugger.png)
 
-ROM files should ideally be either 8192 bytes, 32768 bytes, or 2097152 bytes.
-
-| **Type** | **Length**     | **Mapping**                                                                   |
-|----------|----------------|-------------------------------------------------------------------------------|
-| 8K       | 8192           | 0xE000-0xFFFF                                                                 |
-| 32K      | 32768          | 0x8000-0xFFFF                                                                 |
-| 2M       | 2097152        | 0x8000-0xBFFF (movable)<br/> 0xC000-0xFFFF (fixed)                            |
-| UNKNOWN  | Anything else  | End of file aligned with 0xFFFF<br/> Access up to 32K at the end of the file. |
-
-
-
-Gamepad input is emulated (only on port A right now) with the arrow keys, Z, X, C, and Enter.
-
-Other utility keys are:
-
-* Hold F to go Fast (skip SDL_Delay between batches of emulated instructions)
-
-* Press R for soft Reset (set registers to zero, jump execution to the RESET vector, but otherwise memory is left intact)
-
-* Shift+R for HARD reset that randomizes memory and registers, to simulate a cold boot
-
-* Press Esc to toggle the menu toolbar.
-
-* Press O to load a rom file at runtime. The dialog also appears if the emulator is launched without specifying a rom file.
-
-* Press F9 to load the memory browser.
-
-* Press F10 to open a window that displays some system state info such as the CPU status register or the contents of video/graphics memory.
-
-* Press F12 to open the timing profiler. The ACP value represents the number of cycles per sample rate used by the audio co-processor, measured from the IRQ to the RTI.
-
-For Windows users, I've set up an automated [nightly build](https://gametank.zone/emulator/win/latest.php) that contains the latest features... and of course the latest bugs.
-
-_For now I'm listing the differences between the emulator and the real hardware; stopping short of writing a programming manual for the GameTank which will be a separate wiki-like document to come later_
-
-## Build Instructions:
-
-The GameTankEmulator is compiled with [GCC, the GNU Compiler Collection](https://gcc.gnu.org). Please make sure GCC is available on your system.
-
-This project includes some dependencies via [Git Submodules](https://git-scm.com/book/en/v2/Git-Tools-Submodules). To ensure these dependencies are available, either clone with `--recurse-submodules` or run the following commands after cloning:
-
-```sh
-$ git submodule init
-$ git submodule update
-```
-
-If when building you receive the error `fatal error: implot.h: No such file or directory`, the is likely due to not correctly pulling in the required Git Submodules.
-
-The GameTank Emulator also depends on SDL2. On Linux, X11 development libraries are also required. If you while building you receive errors like `fatal error: SDL2/SDL.h: No such file or directory` or `fatal error: X11/Xlib.h: No such file or directory` please make sure that these libraries are installed.
-
-Once all dependencies are ready, the GameTank Emulator can be built by using make:
-
-```sh
-$ make install
-```
-
-This should build the GameTank Emulator and install it to `./bin` (the location can be changed with the `$INSTALL_DIR` environment variable). One of the included test roms can then be used to confirm that the GameTank Emulator is functioning as intended:
-
-```sh
-$ ./bin/GameTankEmulator roms/hello.gtr
-```
-
-## Emulated Capabilities:
-
-### Video:
-
-The graphics board of the GameTank has all its features emulated in a _mostly accurate_ fashion. The emulated graphics can do anything you probably intended to do on the real thing, minus the composite video artifacts.
-
-On the graphics board is 32K of framebuffer memory, 32K of "asset" or "sprite" memory, and a handful of control registers for a blitting engine. The rendered image is 128x128 pixels, though a TV cuts off the first and last few rows for an effective resolution of 128x100. Also the column 0 color is used for the border on each row, stretching between the image area and the true edges of the screen.
-
-The DMA controller can be configured for direct CPU access to either page of the framebuffer, either page of the asset memory, or access to the blitting registers. Blitting operations consist of setting the width, height, X and Y within the asset memory, X and Y within the framebuffer for a rectangular area. The blitter will begin copying when its trigger register is written to.
-
-The blitter can also be used to draw rectangles of solid color, or to skip copying pixels with value 0x00 to treat them as transparent.
-
-### Audio:
-
-Audio is produced by a second 6502 connected to an 8-bit DAC and 4K of dual-port RAM. The main processor can write programs to the Audio RAM from 0x3000 to 0x3FFF, and trigger interrupts on the Audio Processor by writing to certain registers.
-
-The Audio Processor uses a hardware timer to generate interrupts at a consistent rate. The same timing signal is also used to transfer from an intermediate buffer into the DAC. The Audio Processor writes to the intermediate buffer when writing to any address above 0x8000.
-
-Since the intermediate buffer only copies to the DAC when the hardware timer activates, the intermediate buffer may be written to at any time without causing jitter on the DAC output.
-
-### Input:
-
-As mentioned above, a gamepad is emulated with the keyboard keys. (I figured it'd be more convenient to list the key bindings at the top.)
-
-The emulated gamepad is updated during VSync, whereas the real system latches the values from the controller as the register is read.
-
-You can think of the Z, X, C, and Enter as A, B, C, Start on a Sega Genesis controller; which is what I'm testing the physical system with. Eventually I plan to design a custom controller compatible with the same interface.
-### Versatile Interface Adapter (VIA):
-
-In the real system, this is mostly used for setting up IRQ timer interrupts. But it also is wired to a header for a sort of parallel port, as well as another header that could maybe be used for I2C interface to special cartridges.
-
-The VIA timer is not yet implemented, but for 2MB cartridges the SPI pins are emulated to set the position of the movable ROM window. These are on the ORA register.
-
-The ORB register is used to interact with the profiling window in the emulator. (Currently has no physical equivalent)
+![The memory browser](docs/memory-browser.png)

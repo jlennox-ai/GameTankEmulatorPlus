@@ -39,6 +39,8 @@ using namespace std;
 
 
 
+class StateFile;
+
 class mos6502
 {
 private:
@@ -269,4 +271,7 @@ public:
 		uint64_t& cycleCount,
 		CycleMethod cycleMethod = CYCLE_COUNT);
 	void Freeze();
+	// Saves or loads the registers and interrupt state (save_state.h). irq_gate isn't included:
+	// it's always the same flag for a given CPU.
+	void SerializeState(StateFile& file);
 };

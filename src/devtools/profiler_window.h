@@ -11,5 +11,5 @@ private:
     bool profilerSeen[PROFILER_ENTRIES] = {0};
     void recurse_tree_nodes(Profiler::DeepProfileCallNode* node, uint64_t totalCycles, uint64_t startTime);
 public:
-    ProfilerWindow(Profiler& profiler): _profiler(profiler) {};
+    ProfilerWindow(Profiler& profiler): DebugWindow("Profiler", "profiler"), _profiler(profiler) {};
 };

@@ -59,6 +59,19 @@ GameConfig::GameConfig(const char* path) {
                 breakp.enabled = (bool) (*tbl->get_as<bool>("enabled"));
                 breakp.linked = false;
                 breakp.linkFailed = false;
+                if(tbl->contains("file")) {
+                    breakp.by_source_line = true;
+                    breakp.source_file = (*tbl)["file"].value_or(""sv);
+                    breakp.source_line = (int) (*tbl)["line"].value_or((int64_t) 0);
+                    breakp.line_text = (*tbl)["text"].value_or(""sv);
+                    breakp.line_before = (*tbl)["before"].value_or(""sv);
+                    breakp.line_after = (*tbl)["after"].value_or(""sv);
+                } else if(breakp.by_address && breakp.bank_set) {
+                    // Saved before source line breakpoints remembered their line: their name is
+                    // "file:line". Without the line's text, they're found again by number only.
+                    breakp.by_source_line = Breakpoints::parseSourceLineName(breakp.name, breakp.source_file,
+                        breakp.source_line);
+                }
                 Breakpoints::breakpoints.emplace_back(breakp);
             }
         }
@@ -99,6 +112,13 @@ void GameConfig::Save() {
         breakTomlEntry.emplace("name", breakEntry.name);
         breakTomlEntry.emplace("enabled", breakEntry.enabled);
         breakTomlEntry.emplace("by_addr", breakEntry.by_address);
+        if(breakEntry.by_source_line) {
+            breakTomlEntry.emplace("file", breakEntry.source_file);
+            breakTomlEntry.emplace("line", breakEntry.source_line);
+            breakTomlEntry.emplace("text", breakEntry.line_text);
+            breakTomlEntry.emplace("before", breakEntry.line_before);
+            breakTomlEntry.emplace("after", breakEntry.line_after);
+        }
         breakArray.push_back(breakTomlEntry);
     }
     config.emplace("breakpoints", breakArray);

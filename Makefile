@@ -70,6 +70,10 @@ ifeq ($(OS), Windows_NT)
 
 	OBJS += $(NATIVE_OBJS)
 
+	# The exe's icon (res/gametank_emulator.rc), compiled by the toolchain's resource compiler.
+	WINDRES ?= x86_64-w64-mingw32-windres
+	OBJS += $(OUT_DIR)/res/gametank_emulator.rc.o
+
 	#COMPILER_FLAGS specifies the additional compilation options we're using
 	# -Wl,-subsystem,windows gets rid of the console window
 	# change subsystem,windows to subsystem,console to get printfs on command line
@@ -162,6 +166,10 @@ $(OUT_DIR)/%.cpp.o: %.cpp
 $(OUT_DIR)/%.c.o: %.c
 	@mkdir -p $(@D)
 	$(CC) -c $< -o $@ $(INCLUDE_PATHS) $(OPTIM_FLAGS) $(COMPILER_FLAGS) $(DEFINES)
+
+$(OUT_DIR)/%.rc.o: %.rc res/gametank_emulator.ico
+	@mkdir -p $(@D)
+	$(WINDRES) --include-dir $(<D) $< -O coff -o $@
 
 $(OUT_DIR)/$(BIN_NAME): $(OBJS)
 	$(CPPC) $(OPTIM_FLAGS) $(COMPILER_FLAGS) -o $@ $^ $(LIBRARY_PATHS) $(LINKER_FLAGS) -std=c++20

@@ -1,5 +1,6 @@
 
 #include "mos6502.h"
+#include "../save_state.h"
 
 mos6502::mos6502(BusRead r, BusWrite w, CPUEvent stp, BusRead sync)
 {
@@ -2304,4 +2305,20 @@ void mos6502::Op_SMB6(uint16_t src)
 void mos6502::Op_SMB7(uint16_t src)
 {
 	Op_SMBx(128, src);
+}
+
+void mos6502::SerializeState(StateFile& file) {
+	file.Value(A);
+	file.Value(X);
+	file.Value(Y);
+	file.Value(sp);
+	file.Value(pc);
+	file.Value(status);
+	file.Value(irq_timer);
+	file.Value(irq_line);
+	file.Value(opExtraCycles);
+	file.Value(freeze);
+	file.Value(illegalOpcode);
+	file.Value(waiting);
+	file.Value(illegalOpcodeSrc);
 }

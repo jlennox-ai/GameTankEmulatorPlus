@@ -8,7 +8,9 @@ enum ClockMode {
     CLOCKMODE_NORMAL,
     CLOCKMODE_SINGLE,
     CLOCKMODE_STOPPED,
+    // Running until SourceStepper says the step is done (devtools/source_stepper.h).
     CLOCKMODE_STEPOUT,
+    CLOCKMODE_STEPSOURCE,
 };
 
 class Timekeeper {

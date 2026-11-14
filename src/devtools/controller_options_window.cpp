@@ -30,7 +30,7 @@ const char* controller_button_strings[] = {
     "C"
 };
 
-ControllerOptionsWindow::ControllerOptionsWindow(JoystickAdapter* inputAdapter) {
+ControllerOptionsWindow::ControllerOptionsWindow(JoystickAdapter* inputAdapter) : DebugWindow("Controllers") {
     int width, height, channels;
     this->inputAdapter = inputAdapter;
 

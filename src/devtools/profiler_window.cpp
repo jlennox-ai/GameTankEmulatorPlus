@@ -40,7 +40,11 @@ ImVec2 ProfilerWindow::Render() {
 
     ImVec2 sizeOut = {0, 0};
 
-    ImGui::Begin("Profiler", NULL, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+    // Fill the SDL window, whatever size it has been resized to.
+    ImGui::SetNextWindowPos({0, 0});
+    ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+    ImGui::Begin("Profiler", NULL, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar
+        | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
     ImGui::BeginTabBar("profilertabs", 0);
     if(ImGui::BeginTabItem("Stopwatches")) {
         ImGui::Text("FPS: %d", _profiler.fps);
@@ -120,9 +124,7 @@ ImVec2 ProfilerWindow::Render() {
         ImGui::EndTabItem();
     }
     ImGui::EndTabBar();
-    ImGui::SetWindowPos({0, 0});
-    ImGui::SetWindowSize({800,800});
-    sizeOut = ImVec2(800, 800);
+    sizeOut = ImVec2(800, 800); // the initial size; the window can be resized from there
     ImGui::End();
     return sizeOut;
 }

@@ -1,0 +1,3 @@
+// The exe's icon: Explorer shows it, and SDL uses the first icon for the window and taskbar.
+// Drawn by misc/make_icon.py.
+1 ICON "gametank_emulator.ico"

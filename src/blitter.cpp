@@ -1,4 +1,5 @@
 #include "blitter.h"
+#include "save_state.h"
 
 Uint32 get_pixel32( SDL_Surface *surface, int x, int y )
 {
@@ -132,4 +133,21 @@ void Blitter::CatchUp(uint64_t cycles) {
             }
 
     }
+}
+
+void Blitter::SerializeState(StateFile& file) {
+    file.Value(counterVX);
+    file.Value(counterVY);
+    file.Value(counterGX);
+    file.Value(counterGY);
+    file.Value(counterW);
+    file.Value(counterH);
+    file.Value(params);
+    file.Value(trigger);
+    file.Value(init);
+    file.Value(irq);
+    file.Value(running);
+    file.Value(last_updated_cycle);
+    file.Value(gram_mid_bits);
+    file.Value(pixels_this_frame);
 }

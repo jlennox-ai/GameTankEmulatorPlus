@@ -254,6 +254,16 @@ void SourceMap::GetFileContent(SourceMapFile &sourceMapFile) {
     sourceMapFile.contents_cached = true;
 }
 
+const std::vector<std::string>* SourceMap::GetFileLines(const std::string& name) {
+    for(auto& file : files) {
+        if(file.name == name) {
+            GetFileContent(file);
+            return file.contents_cached ? &file.contents : nullptr;
+        }
+    }
+    return nullptr;
+}
+
 SourceMapReverseSearchResult SourceMap::ReverseSearch(std::string name, int line) {
     SourceMapReverseSearchResult result = { false, 0, 0 };
     int file_idx = -1;

@@ -2,6 +2,11 @@
 #include <vector>
 #include <string>
 #include <cstdint>
+#include <unordered_map>
+
+// Splits a line of an ld65-style debug file ("type<TAB>key=value,key=value") into its type and
+// pairs. False if it isn't one. Also used for variables.dbg (variable_map.h).
+bool parseLine(const std::string& line, std::string& typeName, std::unordered_map<std::string, std::string>& keyValuePairs);
 
 typedef struct SourceMapLine {
     unsigned int id;
@@ -62,6 +67,9 @@ public:
     std::string project_root;
     static SourceMap* singleton;
     void GetFileContent(SourceMapFile &sourceMapFile);
+    // The lines of the source file with that name (read once); nullptr if it isn't in the map or
+    // can't be read.
+    const std::vector<std::string>* GetFileLines(const std::string& name);
     SourceMap(std::string& dbg_file_path);
     SourceMapSearchResult Search(uint16_t addr, uint8_t bank);
     SourceMapReverseSearchResult ReverseSearch(std::string name, int line);

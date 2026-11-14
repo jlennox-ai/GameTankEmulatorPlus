@@ -3,8 +3,33 @@
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"
 #include "../emulator_config.h"
+#include "window_sizes.h"
 
-DebugWindow::DebugWindow():BaseWindow(10, 10) {
+// How much of a window's top left corner must be on a monitor for its saved position to be used:
+// enough to grab it. A position on a monitor that's since been unplugged isn't.
+#define ON_SCREEN_MARGIN 32
+
+static bool position_is_on_a_display(int x, int y) {
+    SDL_Point corner = { x + ON_SCREEN_MARGIN, y + ON_SCREEN_MARGIN };
+    for(int display = 0; display < SDL_GetNumVideoDisplays(); ++display) {
+        SDL_Rect bounds;
+        if((SDL_GetDisplayBounds(display, &bounds) == 0) && SDL_PointInRect(&corner, &bounds)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+DebugWindow::DebugWindow(const char* title, const char* sizeName):
+    BaseWindow(title, 10, 10, (sizeName == nullptr) ? 0 : SDL_WINDOW_RESIZABLE),
+    size_name((sizeName == nullptr) ? "" : sizeName) {
+    // Before any events, so a move event from opening can't save over the position first.
+    int x;
+    int y;
+    if(!size_name.empty() && WindowSizes::LoadPosition(size_name, x, y) && position_is_on_a_display(x, y)) {
+        SDL_SetWindowPosition(window, x, y);
+    }
+
     ImGuiContext* oldCtx = ImGui::GetCurrentContext();
     ImPlotContext* oldPlotCtx = ImPlot::GetCurrentContext();
     ctx = ImGui::CreateContext();
@@ -54,7 +79,12 @@ void DebugWindow::Draw() {
     ImVec2 size = Render();
 
     if(size_dirty) {
-        SDL_SetWindowSize(window, size.x, size.y);
+        int width = (int) size.x;
+        int height = (int) size.y;
+        if(!size_name.empty()) {
+            WindowSizes::Load(size_name, width, height);
+        }
+        SDL_SetWindowSize(window, width, height);
         size_dirty = false;
     }
 
@@ -73,6 +103,17 @@ void DebugWindow::Draw() {
     SDL_RenderPresent(renderer);
 }
 
+bool DebugWindow::IsTypingText() {
+    if(imgui_already_cleaned) {
+        return false;
+    }
+    ImGuiContext* oldCtx = ImGui::GetCurrentContext();
+    ImGui::SetCurrentContext(ctx);
+    bool typing = ImGui::GetIO().WantTextInput;
+    ImGui::SetCurrentContext(oldCtx);
+    return typing;
+}
+
 void DebugWindow::HandleEvent(SDL_Event& e) {
     if(e.type == SDL_WINDOWEVENT) {
         if(e.window.event == SDL_WINDOWEVENT_CLOSE) {
@@ -81,6 +122,12 @@ void DebugWindow::HandleEvent(SDL_Event& e) {
                 open = false;
                 Cleanup();
             }
+        } else if((e.window.event == SDL_WINDOWEVENT_RESIZED) && !size_name.empty()
+            && (e.window.windowID == SDL_GetWindowID(window))) {
+            WindowSizes::Save(size_name, e.window.data1, e.window.data2);
+        } else if((e.window.event == SDL_WINDOWEVENT_MOVED) && !size_name.empty()
+            && (e.window.windowID == SDL_GetWindowID(window))) {
+            WindowSizes::SavePosition(size_name, e.window.data1, e.window.data2);
         }
     }
 

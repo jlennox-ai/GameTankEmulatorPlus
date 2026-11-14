@@ -4,6 +4,7 @@
 #include <fstream>
 
 #include "audio_coprocessor.h"
+#include "save_state.h"
 #include "emulator_config.h"
 
 void AudioCoprocessor::ram_write(uint16_t address, uint8_t value) {
@@ -192,4 +193,24 @@ void AudioCoprocessor::dump_ram(const char* filename) {
 
 uint16_t AudioCoprocessor::get_irq_cycle_count() {
     return state.last_irq_cycles;
+}
+
+// Holds the audio thread off for as long as it exists.
+struct AudioDeviceLock {
+    SDL_AudioDeviceID device;
+    explicit AudioDeviceLock(SDL_AudioDeviceID device) : device(device) { SDL_LockAudioDevice(device); }
+    ~AudioDeviceLock() { SDL_UnlockAudioDevice(device); }
+};
+
+void AudioCoprocessor::SerializeState(StateFile& file) {
+    AudioDeviceLock lock(state.device);
+    file.Value(state.ram);
+    state.cpu->SerializeState(file);
+    file.Value(state.irqCounter);
+    file.Value(state.irqRate);
+    file.Value(state.running);
+    file.Value(state.resetting);
+    file.Value(state.dacReg);
+    file.Value(state.last_irq_cycles);
+    file.Value(state.cycle_counter);
 }

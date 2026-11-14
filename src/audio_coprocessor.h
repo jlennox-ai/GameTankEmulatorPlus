@@ -30,6 +30,8 @@ typedef struct ACPState {
 	bool isEmulationPaused;
 } ACPState;
 
+class StateFile;
+
 class AudioCoprocessor {
 private:
 	//emulated registers/memory
@@ -45,4 +47,7 @@ public:
 	void dump_ram(const char* filename);
 	uint16_t get_irq_cycle_count();
 	static void fill_audio(void *udata, uint8_t *stream, int len);
+	// Saves or loads its RAM, CPU and timing (save_state.h), with the audio thread, which runs
+	// it, held off meanwhile. Not the host's audio settings (volume, mute, the device).
+	void SerializeState(StateFile& file);
 };

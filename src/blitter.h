@@ -19,6 +19,8 @@
 Uint32 get_pixel32( SDL_Surface *surface, int x, int y );
 void put_pixel32( SDL_Surface *surface, int x, int y, Uint32 pixel );
 
+class StateFile;
+
 class Blitter {
 private:
     mos6502*& cpu_core;
@@ -61,4 +63,6 @@ public:
 
     void SetParam(uint8_t address, uint8_t value);
     void CatchUp(uint64_t cycles=0);
+    // Saves or loads the blit in progress and the parameters (save_state.h).
+    void SerializeState(StateFile& file);
 };

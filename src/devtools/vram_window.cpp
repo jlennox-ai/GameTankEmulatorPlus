@@ -7,9 +7,8 @@
 VRAMWindow::VRAMWindow(
     SDL_Surface* vram, SDL_Surface* gram, 
     SystemState* system, mos6502* cpu, 
-    CartridgeState* cartridge) : BaseWindow(BUFFERS_PREVIEW_WIDTH, BUFFERS_PREVIEW_HEIGHT) {
+    CartridgeState* cartridge) : BaseWindow("VRAM Viewer", BUFFERS_PREVIEW_WIDTH, BUFFERS_PREVIEW_HEIGHT) {
 
-    SDL_SetWindowTitle(window, "VRAM Viewer");
     surface = SDL_GetWindowSurface(window);
     SDL_SetColorKey(surface, SDL_FALSE, 0);
 

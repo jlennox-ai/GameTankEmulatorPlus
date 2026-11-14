@@ -11,5 +11,5 @@ private:
 protected:
     ImVec2 Render();
 public:
-    PatchingWindow(MemoryMap*& memorymap, GameConfig*& gameconfig) : memorymap(memorymap), gameconfig(gameconfig) {};
+    PatchingWindow(MemoryMap*& memorymap, GameConfig*& gameconfig) : DebugWindow("Patching"), memorymap(memorymap), gameconfig(gameconfig) {};
 };
