@@ -475,7 +475,9 @@ ImVec2 SteppingWindow::Render() {
             } else {
                 snprintf(location, sizeof(location), "%04x", man.address);
             }
-            std::string label = man.by_address ? location : (man.name + "@" + location);
+            // Source line breakpoints are found by address too, but their file and line say more.
+            bool show_name = !man.by_address || man.by_source_line;
+            std::string label = show_name ? (man.name + "@" + location) : location;
             // A breakpoint whose name wasn't found has no address to show.
             ImGui::BeginDisabled(man.linkFailed);
             ImGui::PushStyleColor(ImGuiCol_Text, color);
