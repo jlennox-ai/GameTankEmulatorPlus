@@ -1,0 +1,88 @@
+# On a version tag (v1.0, v1.1, ...): builds the emulator for Windows and Linux, and publishes a
+# GitHub release with both, its notes taken from the tag's message (git tag -a v1.1 -m "...").
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  SDL_VERSION: 2.26.2
+
+jobs:
+  windows:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install the mingw-w64 cross compiler
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64 zip
+
+      # The Makefile expects SDL2's mingw package beside the repo (../SDL2-<version>).
+      - name: Get SDL2 for mingw
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/sdl.tar.gz" \
+            "https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL2-devel-$SDL_VERSION-mingw.tar.gz"
+          tar xzf "$RUNNER_TEMP/sdl.tar.gz" -C ..
+
+      - name: Build
+        run: make OS=Windows_NT CC=x86_64-w64-mingw32-gcc-posix CPPC=x86_64-w64-mingw32-g++-posix -j"$(nproc)" bin
+
+      - name: Package
+        run: |
+          mkdir package
+          cp build/GameTankEmulator.exe "../SDL2-$SDL_VERSION/x86_64-w64-mingw32/bin/SDL2.dll" package/
+          cd package && zip -9 "../GameTankEmulatorPlus-$GITHUB_REF_NAME-windows.zip" *
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: GameTankEmulatorPlus-*-windows.zip
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install SDL2
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
+
+      - name: Build
+        run: make -j"$(nproc)" bin
+
+      - name: Package
+        run: tar czf "GameTankEmulatorPlus-$GITHUB_REF_NAME-linux-x86_64.tar.gz" -C build GameTankEmulator
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: GameTankEmulatorPlus-*-linux-x86_64.tar.gz
+
+  release:
+    needs: [windows, linux]
+    runs-on: ubuntu-24.04
+    steps:
+      # The whole history, so the tag comes with its message.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --force --tags
+          git tag --list --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md
