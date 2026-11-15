@@ -2,6 +2,7 @@
 #include "debug_window.h"
 #include "window_sizes.h"
 #include "memory_map.h"
+#include "variable_map.h"
 #include "../game_config.h"
 #include <functional>
 #include <string>
@@ -45,6 +46,11 @@ private:
     void RenderExplorer();
     // The status bar under the Explorer grid, about the byte under the mouse (-1: none).
     void RenderStatusBar(int hovered_address);
+    // The variable the hovered byte is in (-1: none): a tooltip with the struct around it, its
+    // own line marked. The grid tints that struct and the byte's part of it on the next frame.
+    void RenderOwnerTooltip(int hovered_address);
+    bool hover_owner_shown = false;
+    VariableMap::MemoryOwner hover_owner;
 protected:
     ImVec2 Render();
 public:

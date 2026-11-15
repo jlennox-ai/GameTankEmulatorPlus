@@ -1,5 +1,6 @@
 #include "imgui.h"
 #include "mem_browser_window.h"
+#include "variable_map.h"
 #include "../tinyfd/tinyfiledialogs.h"
 
 #include "./imgui-combo-filter.h"
@@ -30,6 +31,10 @@ static const ImVec2 table_fill_size = ImVec2(0, 0);
 // Where the highlighted row lands when scrolled to: a little above the middle.
 #define HIGHLIGHT_SCROLL_RATIO 0.3f
 static const ImU32 highlight_color = IM_COL32(200, 150, 40, 110);
+// The hovered byte's struct, and its own part of it, in the grid; the part's lines in the tooltip.
+static const ImU32 hover_container_color = IM_COL32(70, 120, 200, 70);
+static const ImU32 hover_part_color = IM_COL32(70, 120, 200, 170);
+static const ImVec4 hover_part_text_color = ImVec4(1, 0.85f, 0.3f, 1);
 
 #define TOP_ROW_SAVE_INTERVAL_MS 1000
 
@@ -164,6 +169,15 @@ void MemBrowserWindow::RenderExplorer() {
                     if(has_highlight && (address >= highlight_start) && (address < highlight_start + highlight_size)) {
                         ImGui::TableSetBgColor(ImGuiTableBgTarget_CellBg, highlight_color);
                     }
+                    // The hovered byte's struct, and its part of it (from the last frame's hover).
+                    if(hover_owner_shown && (VariableMap::singleton != nullptr)) {
+                        VariableMap::ByteRole role = VariableMap::singleton->RoleOf(hover_owner, address);
+                        if(role == VariableMap::ByteRole::Part) {
+                            ImGui::TableSetBgColor(ImGuiTableBgTarget_CellBg, hover_part_color);
+                        } else if(role == VariableMap::ByteRole::Container) {
+                            ImGui::TableSetBgColor(ImGuiTableBgTarget_CellBg, hover_container_color);
+                        }
+                    }
                     bool selected = has_selection && (address >= selection_low) && (address <= selection_high);
                     char label[16];
                     std::snprintf(label, sizeof(label), "%02x##%04x", mem_read(address, false), address);
@@ -221,7 +235,32 @@ void MemBrowserWindow::RenderExplorer() {
         ImGui::SetClipboardText(SelectionText().c_str());
     }
 
+    RenderOwnerTooltip(hovered_address);
     RenderStatusBar(hovered_address);
+}
+
+void MemBrowserWindow::RenderOwnerTooltip(int hovered_address) {
+    hover_owner_shown = (hovered_address >= 0) && (VariableMap::singleton != nullptr)
+        && VariableMap::singleton->FindOwner((uint16_t) hovered_address,
+            [this](uint16_t address) { return mem_read(address, false); }, hover_owner);
+    if(!hover_owner_shown) {
+        return;
+    }
+    ImGui::BeginTooltip();
+    ImGui::TextUnformatted(hover_owner.part.c_str());
+    if(hover_owner.container != hover_owner.part) {
+        ImGui::TextDisabled("in %s", hover_owner.container.c_str());
+    }
+    ImGui::TextDisabled("%s, %s", hover_owner.containerType.c_str(), hover_owner.containerWhere.c_str());
+    ImGui::Separator();
+    for(auto& line : hover_owner.lines) {
+        if(line.second) {
+            ImGui::TextColored(hover_part_text_color, "%s", line.first.c_str());
+        } else {
+            ImGui::TextUnformatted(line.first.c_str());
+        }
+    }
+    ImGui::EndTooltip();
 }
 
 // Fixed-width panes, so one pane's text changing length doesn't move the ones after it.

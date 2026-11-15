@@ -1,4 +1,5 @@
 #include "variable_map.h"
+#include <algorithm>
 #include <cctype>
 #include "source_map.h"
 #include <cstdio>
@@ -144,6 +145,51 @@ VariableMap::VariableMap(const std::string& path) {
             location.operations = Split(Field(fields, "ops", path), ' ');
             variables[index->second].locations.push_back(location);
         }
+    }
+
+    // The memory browser's lookup by address: globals and static locals, whose one location is a
+    // fixed address ("addr:<decimal>"), or pieces at fixed addresses ("addr:14 piece:2 ..."; a
+    // piece computed instead, "lit:4 mul ... stack_value piece:1", isn't in memory).
+    byteOwners.assign(0x10000, { -1, 0 });
+    for(size_t i = 0; i < variables.size(); ++i) {
+        const Variable& variable = variables[i];
+        if(variable.locations.size() != 1) {
+            continue;
+        }
+        const std::vector<std::string>& operations = variable.locations[0].operations;
+        std::vector<MemoryPiece> pieces;
+        uint32_t size = SizeOf(variable.type);
+        if((operations.size() == 1) && (operations[0].compare(0, 5, "addr:") == 0)) {
+            pieces.push_back({ (uint16_t) std::stoul(operations[0].substr(5)), size, 0 });
+        } else {
+            uint32_t offset = 0;
+            // The operations since the last piece: a piece is in memory when that's just an address.
+            std::vector<std::string> since;
+            for(auto& operation : operations) {
+                if(operation.compare(0, 6, "piece:") != 0) {
+                    since.push_back(operation);
+                    continue;
+                }
+                uint32_t pieceSize = (uint32_t) std::stoul(operation.substr(6));
+                if((since.size() == 1) && (since[0].compare(0, 5, "addr:") == 0)) {
+                    pieces.push_back({ (uint16_t) std::stoul(since[0].substr(5)), pieceSize, offset });
+                }
+                offset += pieceSize;
+                since.clear();
+            }
+        }
+        if(pieces.empty() || (size == 0)) {
+            continue;
+        }
+        for(auto& piece : pieces) {
+            for(uint32_t byte = 0; byte < piece.size; ++byte) {
+                uint32_t address = piece.address + byte;
+                if((address < byteOwners.size()) && (byteOwners[address].first < 0)) {
+                    byteOwners[address] = { (int32_t) i, piece.offset + byte };
+                }
+            }
+        }
+        memoryPieces[i] = pieces;
     }
 }
 
@@ -727,4 +773,217 @@ bool VariableMap::Locate(const Chain& chain, uint16_t pc, const Registers& regis
         size *= count;
     }
     return true;
+}
+
+std::vector<uint8_t> VariableMap::ReadPieces(size_t variable, uint32_t offset, uint32_t size, const MemoryReader& read,
+    std::vector<bool>& inMemory) const {
+    std::vector<uint8_t> bytes(size, 0);
+    inMemory.assign(size, false);
+    auto found = memoryPieces.find(variable);
+    if(found == memoryPieces.end()) {
+        return bytes;
+    }
+    for(auto& piece : found->second) {
+        for(uint32_t byte = 0; byte < piece.size; ++byte) {
+            uint32_t at = piece.offset + byte;
+            if((at >= offset) && (at < offset + size)) {
+                bytes[at - offset] = read((uint16_t) (piece.address + byte));
+                inMemory[at - offset] = true;
+            }
+        }
+    }
+    return bytes;
+}
+
+std::string VariableMap::PiecesWhere(size_t variable, uint32_t offset, uint32_t size) const {
+    // The addresses of the bytes, in order, while they run on from each other.
+    int32_t first = -1;
+    int32_t previous = -1;
+    bool contiguous = true;
+    bool anyMissing = false;
+    auto found = memoryPieces.find(variable);
+    for(uint32_t at = offset; at < offset + size; ++at) {
+        int32_t address = -1;
+        if(found != memoryPieces.end()) {
+            for(auto& piece : found->second) {
+                if((at >= piece.offset) && (at < piece.offset + piece.size)) {
+                    address = piece.address + (at - piece.offset);
+                }
+            }
+        }
+        if(address < 0) {
+            anyMissing = true;
+            continue;
+        }
+        if(first < 0) {
+            first = address;
+        } else if(address != previous + 1) {
+            contiguous = false;
+        }
+        previous = address;
+    }
+    if(first < 0) {
+        return "not in memory (the optimizer computes it)";
+    }
+    if(!contiguous || anyMissing) {
+        return "spread out by the optimizer";
+    }
+    return (size == 1) ? Hex16((uint32_t) first) : (Hex16((uint32_t) first) + "-" + Hex16((uint32_t) previous));
+}
+
+std::vector<const VariableMap::Member*> VariableMap::MembersAt(const Type& structType, uint32_t offset) const {
+    std::vector<const Member*> members;
+    for(auto& member : structType.members) {
+        uint32_t first = member.bitOffset / 8;
+        uint32_t last = (member.bitSize != 0) ? ((member.bitOffset + member.bitSize - 1) / 8)
+            : (first + std::max(SizeOf(member.type), (uint32_t) 1) - 1);
+        if((offset >= first) && (offset <= last)) {
+            members.push_back(&member);
+        }
+    }
+    return members;
+}
+
+bool VariableMap::FindOwner(uint16_t address, const MemoryReader& read, MemoryOwner& owner) const {
+    if(byteOwners.empty() || (byteOwners[address].first < 0)) {
+        return false;
+    }
+    size_t variableIndex = (size_t) byteOwners[address].first;
+    uint32_t target = byteOwners[address].second;
+
+    // Down from the variable to the innermost part with the byte in it, remembering the last
+    // struct passed through on the way. Offsets are into the variable.
+    std::string path = variables[variableIndex].name;
+    uint32_t type = variables[variableIndex].type;
+    uint32_t start = 0;
+    uint32_t size = SizeOf(type);
+    const Type* container = nullptr;
+    uint32_t containerTypeId = 0;
+    std::string containerPath;
+    uint32_t containerStart = 0;
+    while(true) {
+        const Type* resolved = Resolve(type);
+        if(resolved == nullptr) {
+            break;
+        }
+        uint32_t offset = target - start;
+        if((resolved->kind == "struct") || (resolved->kind == "union")) {
+            container = resolved;
+            containerTypeId = type;
+            containerPath = path;
+            containerStart = start;
+            std::vector<const Member*> members = MembersAt(*resolved, offset);
+            if(members.empty()) {
+                // Padding between members: the byte is only the struct's.
+                break;
+            }
+            if((members.size() > 1) || (members[0]->bitSize != 0)) {
+                // Bit-fields sharing the byte, or a union's overlapping members: those are the part.
+                std::string names;
+                for(auto member : members) {
+                    names += (names.empty() ? "" : ", ") + member->name;
+                }
+                path = (members.size() > 1) ? (path + " (" + names + ")") : (path + "." + names);
+                start = target;
+                size = 1;
+                break;
+            }
+            path += "." + members[0]->name;
+            start += members[0]->bitOffset / 8;
+            type = members[0]->type;
+            size = SizeOf(type);
+            continue;
+        }
+        if((resolved->kind == "array") && !resolved->counts.empty()) {
+            uint32_t elementSize = SizeOf(resolved->target);
+            if(elementSize == 0) {
+                break;
+            }
+            // The element's indexes, last dimension fastest.
+            uint32_t flat = offset / elementSize;
+            std::vector<uint32_t> indexes(resolved->counts.size());
+            uint32_t remaining = flat;
+            for(size_t dimension = resolved->counts.size(); dimension-- > 0;) {
+                indexes[dimension] = remaining % resolved->counts[dimension];
+                remaining /= resolved->counts[dimension];
+            }
+            for(auto index : indexes) {
+                path += "[" + std::to_string(index) + "]";
+            }
+            start += flat * elementSize;
+            type = resolved->target;
+            size = elementSize;
+            continue;
+        }
+        // A number, enum or pointer: as far down as it goes.
+        break;
+    }
+
+    owner.variable = variableIndex;
+    owner.part = path;
+    owner.partOffset = start;
+    owner.partSize = size;
+    owner.lines.clear();
+    std::vector<bool> inMemory;
+    if(container == nullptr) {
+        // In no struct: the part is shown by itself.
+        owner.container = path;
+        owner.containerType = TypeName(type);
+        owner.containerOffset = start;
+        owner.containerSize = size;
+        owner.containerWhere = PiecesWhere(variableIndex, start, size);
+        std::vector<uint8_t> bytes = ReadPieces(variableIndex, start, size, read, inMemory);
+        owner.lines.emplace_back(path + " = " + Format(type, bytes, read, 0), true);
+        return true;
+    }
+
+    owner.container = containerPath;
+    owner.containerType = TypeName(containerTypeId);
+    owner.containerOffset = containerStart;
+    owner.containerSize = SizeOf(containerTypeId);
+    owner.containerWhere = PiecesWhere(variableIndex, containerStart, owner.containerSize);
+    std::vector<uint8_t> bytes = ReadPieces(variableIndex, containerStart, owner.containerSize, read, inMemory);
+    std::vector<const Member*> marked = MembersAt(*container, target - containerStart);
+    for(auto& member : container->members) {
+        bool isMarked = std::find(marked.begin(), marked.end(), &member) != marked.end();
+        uint32_t first = member.bitOffset / 8;
+        uint32_t last = (member.bitSize != 0) ? ((member.bitOffset + member.bitSize - 1) / 8)
+            : (first + std::max(SizeOf(member.type), (uint32_t) 1) - 1);
+        bool memberInMemory = true;
+        for(uint32_t byte = first; (byte <= last) && (byte < inMemory.size()); ++byte) {
+            memberInMemory = memberInMemory && inMemory[byte];
+        }
+        std::string text = member.name + " = ";
+        if(memberInMemory) {
+            std::vector<uint8_t> memberBytes = MemberBytes(bytes, member.bitOffset, member.bitSize, SizeOf(member.type));
+            text += Format(member.type, memberBytes, read, 1);
+        } else {
+            text += "(not in memory)";
+        }
+        // A nested struct's value takes several lines: all of them are the member's.
+        size_t lineStart = 0;
+        while(true) {
+            size_t lineEnd = text.find('\n', lineStart);
+            owner.lines.emplace_back(text.substr(lineStart, lineEnd - lineStart), isMarked);
+            if(lineEnd == std::string::npos) {
+                break;
+            }
+            lineStart = lineEnd + 1;
+        }
+    }
+    return true;
+}
+
+VariableMap::ByteRole VariableMap::RoleOf(const MemoryOwner& owner, uint16_t address) const {
+    if(byteOwners.empty() || (byteOwners[address].first != (int32_t) owner.variable)) {
+        return ByteRole::None;
+    }
+    uint32_t offset = byteOwners[address].second;
+    if((offset >= owner.partOffset) && (offset < owner.partOffset + owner.partSize)) {
+        return ByteRole::Part;
+    }
+    if((offset >= owner.containerOffset) && (offset < owner.containerOffset + owner.containerSize)) {
+        return ByteRole::Container;
+    }
+    return ByteRole::None;
 }

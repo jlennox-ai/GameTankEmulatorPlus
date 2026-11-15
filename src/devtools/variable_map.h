@@ -41,6 +41,34 @@ public:
     bool ResolveIndex(const std::string& text, uint16_t pc, const Registers& registers, const MemoryReader& read,
         int64_t& index) const;
 
+    // What a byte of memory is, by the variables at fixed addresses (globals and static locals,
+    // including ones the optimizer split into pieces at different addresses), for the memory
+    // browser: the innermost part of one it's in, and the struct around that.
+    struct MemoryOwner {
+        // The innermost variable, member or element the byte is in: "g_well.Blocks[2][3].Timer".
+        // Bit-fields sharing the byte are all named: "g_well.Blocks[2][3] (State, Color)".
+        std::string part;
+        // The innermost struct around it, or the part itself when it's in none.
+        std::string container;
+        std::string containerType;
+        // Where the container is: "$0200-$0233", or that the optimizer spread it out.
+        std::string containerWhere;
+        // The container's value a line at a time, each marked when it's (in) the part.
+        std::vector<std::pair<std::string, bool>> lines;
+        // Which bytes of the variable they are, for ByteRole.
+        size_t variable = 0;
+        uint32_t containerOffset = 0;
+        uint32_t containerSize = 0;
+        uint32_t partOffset = 0;
+        uint32_t partSize = 0;
+    };
+    // False if no variable at a fixed address covers the byte.
+    bool FindOwner(uint16_t address, const MemoryReader& read, MemoryOwner& owner) const;
+    enum class ByteRole { None, Container, Part };
+    // What another byte is to an owner found by FindOwner: in its part, elsewhere in its
+    // container, or neither.
+    ByteRole RoleOf(const MemoryOwner& owner, uint16_t address) const;
+
 private:
     struct Member {
         std::string name;
@@ -92,6 +120,18 @@ private:
         std::string where;
     };
 
+    // A run of a fixed-address variable's bytes in memory: the whole variable, or one piece of
+    // one the optimizer split up.
+    struct MemoryPiece {
+        uint16_t address;
+        uint32_t size;
+        uint32_t offset; // into the variable
+    };
+    // Each fixed-address variable's pieces in memory, by variable index (empty: not one).
+    std::unordered_map<size_t, std::vector<MemoryPiece>> memoryPieces;
+    // Each byte of memory's variable (index, or -1) and offset into it, for the memory browser.
+    std::vector<std::pair<int32_t, uint32_t>> byteOwners;
+
     uint16_t registerBase = 0;
     std::unordered_map<uint32_t, Type> types;
     std::unordered_map<uint32_t, Scope> scopes;
@@ -106,6 +146,15 @@ private:
     std::string TypeName(uint32_t type) const;
     std::string ArrayTypeName(uint32_t element, const std::vector<uint32_t>& counts) const;
     std::string FormatArray(uint32_t element, const std::vector<uint32_t>& counts, const std::vector<uint8_t>& bytes) const;
+    // The members of a struct that take up its byte at offset (several when bit-fields share it,
+    // or in a union).
+    std::vector<const Member*> MembersAt(const Type& structType, uint32_t offset) const;
+    // A fixed-address variable's bytes at offset (0 where a byte isn't in memory: optimized into
+    // a computed value), and which were in memory.
+    std::vector<uint8_t> ReadPieces(size_t variable, uint32_t offset, uint32_t size, const MemoryReader& read,
+        std::vector<bool>& inMemory) const;
+    // Where the bytes at offset are: "$0200-$0233", or that they're spread out, or not in memory.
+    std::string PiecesWhere(size_t variable, uint32_t offset, uint32_t size) const;
     Value Evaluate(const Variable& variable, uint16_t pc, const Registers& registers, const MemoryReader& read) const;
     int64_t RegisterValue(const std::string& name, const Registers& registers, const MemoryReader& read) const;
     std::vector<uint8_t> RegisterBytes(const std::string& name, uint32_t size, const Registers& registers, const MemoryReader& read) const;
