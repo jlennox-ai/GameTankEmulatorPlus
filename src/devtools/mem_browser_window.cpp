@@ -247,10 +247,9 @@ void MemBrowserWindow::RenderOwnerTooltip(int hovered_address) {
         return;
     }
     ImGui::BeginTooltip();
-    ImGui::TextUnformatted(hover_owner.part.c_str());
-    if(hover_owner.container != hover_owner.part) {
-        ImGui::TextDisabled("in %s", hover_owner.container.c_str());
-    }
+    // Titled by the struct, not the field, so the tooltip keeps its size moving across a struct
+    // (the field is its highlighted line).
+    ImGui::TextUnformatted(hover_owner.container.c_str());
     ImGui::TextDisabled("%s, %s", hover_owner.containerType.c_str(), hover_owner.containerWhere.c_str());
     ImGui::Separator();
     for(auto& line : hover_owner.lines) {
