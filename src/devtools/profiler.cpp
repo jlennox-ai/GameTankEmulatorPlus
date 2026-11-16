@@ -2,6 +2,8 @@
 #include <cmath>
 #include <fstream>
 #include <stack>
+#include <unordered_map>
+#include <utility>
 
 void Profiler::LogTime(uint8_t index) {
 	uint64_t delta = timekeeper.totalCyclesCount - profilingTimeStamps[index];
@@ -80,6 +82,10 @@ void Profiler::exportTimelineToJSON(const std::vector<ProfileEvent>& timeline, c
     rootNode->duration = timekeeper.totalCyclesCount - deepProfileStartCycleCount;
     rootNode->offset = 0;
     cleanupList.push_back(rootNode);
+    // Both lookups search their whole map, and a capture of many frames has many thousands of
+    // calls to a few hundred functions from a few hundred places: each is looked up once.
+    std::unordered_map<uint16_t, std::string> namesByDestination;
+    std::unordered_map<uint32_t, std::pair<bool, SourceMapLine>> linesByOrigin;
     for (const auto& event : timeline) {
         if(event.type == ProfileEventType::CALL) {
             callstack.push(new DeepProfileCallNode());
@@ -87,15 +93,29 @@ void Profiler::exportTimelineToJSON(const std::vector<ProfileEvent>& timeline, c
             callstack.top()->duration = event.cycle_number;
             callstack.top()->offset = event.cycle_number - deepProfileStartCycleCount;
             if(memory_map != nullptr) {
-                Symbol sym;
-                if(memory_map->FindAddress(event.destination, &sym)) {
-                    callstack.top()->name = sym.name;
+                auto cached = namesByDestination.find(event.destination);
+                if(cached == namesByDestination.end()) {
+                    Symbol sym;
+                    std::string name = memory_map->FindAddress(event.destination, &sym) ? sym.name : "";
+                    cached = namesByDestination.emplace(event.destination, name).first;
+                }
+                if(!cached->second.empty()) {
+                    callstack.top()->name = cached->second;
                 }
             }
             if(source_map != nullptr) {
-                SourceMapSearchResult result = source_map->Search(event.origin, event.bank);
-                if(result.found) {
-                    callstack.top()->line = *result.line;
+                uint32_t origin = (((uint32_t) event.bank) << 16) | event.origin;
+                auto cached = linesByOrigin.find(origin);
+                if(cached == linesByOrigin.end()) {
+                    SourceMapSearchResult result = source_map->Search(event.origin, event.bank);
+                    SourceMapLine line = {};
+                    if(result.found) {
+                        line = *result.line;
+                    }
+                    cached = linesByOrigin.emplace(origin, std::make_pair(result.found, line)).first;
+                }
+                if(cached->second.first) {
+                    callstack.top()->line = cached->second.second;
                 }
             }
         } else {
