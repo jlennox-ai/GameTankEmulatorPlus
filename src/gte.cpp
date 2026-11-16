@@ -35,6 +35,7 @@
 #include "devtools/source_map.h"
 #include "devtools/source_stepper.h"
 #include "devtools/variable_map.h"
+#include "devtools/window_sizes.h"
 
 #include "ui/ui_utils.h"
 #include "devtools/profiler.h"
@@ -128,6 +129,11 @@ const bool menuBarAlwaysShown = true;
 // The menu bar and toolbar's height together, measured as they're drawn (0 until then, and
 // without them): the game is drawn below them.
 int topBarsHeight = 0;
+// Whether the 4:3 viewport's margins beside the screen show its rightmost column stretched out
+// (otherwise they're black): Tools > Display Screen Sides, kept between runs.
+bool showScreenSides = true;
+const char* MAIN_WINDOW_SETTINGS = "main_window";
+const char* SCREEN_SIDES_KEY = "screen_sides";
 // Where refreshScreen last drew the game's viewport, for screenshots.
 SDL_Rect lastViewport = { 0, 0, 0, 0 };
 #define GRID_NONE 0
@@ -1312,13 +1318,17 @@ void refreshScreen() {
 	dest.w = dest.w * 86.0 / 512.0;
 	dest.x -= dest.w;
 
-	SDL_RenderCopy(mainRenderer, framebufferTexture, &src, &dest);
+	if(showScreenSides) {
+		SDL_RenderCopy(mainRenderer, framebufferTexture, &src, &dest);
+	}
 
 	dest.x += dest.w + dest.h;
 
-	SDL_RenderCopy(mainRenderer, framebufferTexture, &src, &dest);
+	if(showScreenSides) {
+		SDL_RenderCopy(mainRenderer, framebufferTexture, &src, &dest);
+	}
 
-	if(grid_mode != GRID_NONE && scale >= MIN_DISPLAY_SCALE) {
+	if(showScreenSides && (grid_mode != GRID_NONE) && (scale >= MIN_DISPLAY_SCALE)) {
 		static const Uint8 grid_alphas[] = { 0, 64, 128, 255 };
 		src.x = 0;
 		src.y = 0;
@@ -1454,6 +1464,13 @@ void refreshScreen() {
 						ImGui::EndMenu();
 					}
 					ImGui::EndMenu();
+				}
+				ImGui::Separator();
+				if(ImGui::MenuItem("Display Screen Sides", nullptr, &showScreenSides)) {
+					WindowSizes::SaveValue(MAIN_WINDOW_SETTINGS, SCREEN_SIDES_KEY, showScreenSides ? 1 : 0);
+				}
+				if(ImGui::IsItemHovered()) {
+					ImGui::SetTooltip("Fill the margins beside the screen with its rightmost column, stretched");
 				}
 				ImGui::EndMenu();
 			}
@@ -2060,6 +2077,12 @@ int main(int argC, char* argV[]) {
 	SDL_SetColorKey(vRAM_Surface, SDL_FALSE, 0);
 	SDL_SetColorKey(gRAM_Surface, SDL_FALSE, 0);
 
+#ifndef WASM_BUILD
+	int screenSidesShown;
+	if(WindowSizes::LoadValue(MAIN_WINDOW_SETTINGS, SCREEN_SIDES_KEY, screenSidesShown)) {
+		showScreenSides = (screenSidesShown != 0);
+	}
+#endif
 	mainWindow = SDL_CreateWindow(WINDOW_TITLE, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, viewport_width(display_scale), viewport_height(display_scale), SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
 	SDL_SetWindowMinimumSize(mainWindow, viewport_width(MIN_DISPLAY_SCALE), viewport_height(MIN_DISPLAY_SCALE));
 	mainRenderer = SDL_CreateRenderer(mainWindow, -1, EmulatorConfig::defaultRendererFlags);
