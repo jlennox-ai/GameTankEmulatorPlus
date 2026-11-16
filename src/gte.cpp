@@ -100,6 +100,17 @@ bool vsyncProfileRunning = false;
 bool frameFlipProfileArmed = false;
 bool frameFlipProfileRunning = false;
 int frameFlipProfileVsyncLimit = MAX_FRAME_FLIP_PROFILE_VSYNCS;
+// The frame flips a frame flip profile has left to record.
+int frameFlipProfileFramesLeft = 0;
+// The choices of Deep Profile > Several Frame Flips.
+const int SEVERAL_FRAME_FLIP_COUNTS[] = { 2, 5, 10, 30, 60 };
+
+// Records the next frames frame flips, or until MAX_FRAME_FLIP_PROFILE_VSYNCS vsyncs a frame go by.
+void armFrameFlipProfile(int frames) {
+	frameFlipProfileArmed = true;
+	frameFlipProfileFramesLeft = frames;
+	frameFlipProfileVsyncLimit = MAX_FRAME_FLIP_PROFILE_VSYNCS * frames;
+}
 
 // A vsync NMI that came due while the CPU was stopped (at a breakpoint or the end of a step):
 // raised when it runs again, so a stop never lands in the NMI handler by itself.
@@ -588,8 +599,11 @@ void MemoryWrite(uint16_t address, uint8_t value) {
 						frameFlipProfileArmed = false;
 						frameFlipProfileRunning = true;
 					} else if(frameFlipProfileRunning) {
-						profiler.DeepProfileStop(loadedMemoryMap, SourceMap::singleton);
-						frameFlipProfileRunning = false;
+						--frameFlipProfileFramesLeft;
+						if(frameFlipProfileFramesLeft <= 0) {
+							profiler.DeepProfileStop(loadedMemoryMap, SourceMap::singleton);
+							frameFlipProfileRunning = false;
+						}
 					}
 				}
 				system_state.dma_control = value;
@@ -1422,11 +1436,22 @@ void refreshScreen() {
 						ImGui::SetTooltip("Capture function call timing between the next two VSyncs");
 					}
 					if(ImGui::MenuItem("Single Frame Flip")) {
-						frameFlipProfileArmed = true;
-						frameFlipProfileVsyncLimit = MAX_FRAME_FLIP_PROFILE_VSYNCS;
+						armFrameFlipProfile(1);
 					}
 					if(ImGui::IsItemHovered()) {
 						ImGui::SetTooltip("Capture function call timing between the next two frame flips. Capped at 8 VSync periods");
+					}
+					if(ImGui::BeginMenu("Several Frame Flips")) {
+						for(int frames : SEVERAL_FRAME_FLIP_COUNTS) {
+							std::string label = std::to_string(frames) + " frames";
+							if(ImGui::MenuItem(label.c_str())) {
+								armFrameFlipProfile(frames);
+							}
+							if(ImGui::IsItemHovered()) {
+								ImGui::SetTooltip("Capture function call timing over the next %d frame flips. Capped at 8 VSync periods a frame", frames);
+							}
+						}
+						ImGui::EndMenu();
 					}
 					ImGui::EndMenu();
 				}
