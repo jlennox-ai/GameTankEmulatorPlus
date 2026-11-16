@@ -3,7 +3,7 @@
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"
 #include "../emulator_config.h"
-#include "window_sizes.h"
+#include "settings.h"
 
 // How much of a window's top left corner must be on a monitor for its saved position to be used:
 // enough to grab it. A position on a monitor that's since been unplugged isn't.
@@ -26,7 +26,7 @@ DebugWindow::DebugWindow(const char* title, const char* sizeName):
     // Before any events, so a move event from opening can't save over the position first.
     int x;
     int y;
-    if(!size_name.empty() && WindowSizes::LoadPosition(size_name, x, y) && position_is_on_a_display(x, y)) {
+    if(!size_name.empty() && Settings::LoadPosition(size_name, x, y) && position_is_on_a_display(x, y)) {
         SDL_SetWindowPosition(window, x, y);
     }
 
@@ -82,7 +82,7 @@ void DebugWindow::Draw() {
         int width = (int) size.x;
         int height = (int) size.y;
         if(!size_name.empty()) {
-            WindowSizes::Load(size_name, width, height);
+            Settings::LoadSize(size_name, width, height);
         }
         SDL_SetWindowSize(window, width, height);
         size_dirty = false;
@@ -124,10 +124,10 @@ void DebugWindow::HandleEvent(SDL_Event& e) {
             }
         } else if((e.window.event == SDL_WINDOWEVENT_RESIZED) && !size_name.empty()
             && (e.window.windowID == SDL_GetWindowID(window))) {
-            WindowSizes::Save(size_name, e.window.data1, e.window.data2);
+            Settings::SaveSize(size_name, e.window.data1, e.window.data2);
         } else if((e.window.event == SDL_WINDOWEVENT_MOVED) && !size_name.empty()
             && (e.window.windowID == SDL_GetWindowID(window))) {
-            WindowSizes::SavePosition(size_name, e.window.data1, e.window.data2);
+            Settings::SavePosition(size_name, e.window.data1, e.window.data2);
         }
     }
 

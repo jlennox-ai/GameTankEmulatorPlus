@@ -2,7 +2,7 @@
 #include <algorithm>
 #include <cstdio>
 #include "../SDL_inc.h"
-#include "window_sizes.h"
+#include "settings.h"
 
 #define ROW_BYTES 16
 #define ROWS 4096
@@ -30,7 +30,7 @@ MemoryView::MemoryView(MemoryMap*& memorymap, std::function<uint8_t(uint16_t, bo
     mem_read(mem_read),
     save_name(saveName),
     top_row_key(topRowKey) {
-    if(WindowSizes::LoadValue(save_name, top_row_key.c_str(), saved_top_row)) {
+    if(Settings::LoadValue(save_name, top_row_key.c_str(), saved_top_row)) {
         row_to_restore = saved_top_row;
     }
 }
@@ -53,7 +53,7 @@ void MemoryView::SaveTopRow(bool now) {
     if(!now && (SDL_GetTicks() - top_row_saved_ticks < TOP_ROW_SAVE_INTERVAL_MS)) {
         return;
     }
-    WindowSizes::SaveValue(save_name, top_row_key.c_str(), top_row);
+    Settings::SaveValue(save_name, top_row_key.c_str(), top_row);
     saved_top_row = top_row;
     top_row_saved_ticks = SDL_GetTicks();
 }

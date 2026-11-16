@@ -1,5 +1,5 @@
 #include "debug_window.h"
-#include "window_sizes.h"
+#include "settings.h"
 #include "memory_map.h"
 #include "memory_view.h"
 #include "variable_map.h"
@@ -77,6 +77,6 @@ public:
         show_memory(show_memory),
         memory_pane(memorymap, mem_read, SIZE_NAME, "memory_top_row") {
         int shown = 0;
-        memory_pane_shown = WindowSizes::LoadValue(SIZE_NAME, MEMORY_PANE_KEY, shown) && (shown != 0);
+        memory_pane_shown = Settings::LoadValue(SIZE_NAME, MEMORY_PANE_KEY, shown) && (shown != 0);
     };
 };

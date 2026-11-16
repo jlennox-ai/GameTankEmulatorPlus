@@ -35,7 +35,7 @@
 #include "devtools/source_map.h"
 #include "devtools/source_stepper.h"
 #include "devtools/variable_map.h"
-#include "devtools/window_sizes.h"
+#include "devtools/settings.h"
 
 #include "ui/ui_utils.h"
 #include "devtools/profiler.h"
@@ -1467,7 +1467,7 @@ void refreshScreen() {
 				}
 				ImGui::Separator();
 				if(ImGui::MenuItem("Display Screen Sides", nullptr, &showScreenSides)) {
-					WindowSizes::SaveValue(MAIN_WINDOW_SETTINGS, SCREEN_SIDES_KEY, showScreenSides ? 1 : 0);
+					Settings::SaveValue(MAIN_WINDOW_SETTINGS, SCREEN_SIDES_KEY, showScreenSides ? 1 : 0);
 				}
 				if(ImGui::IsItemHovered()) {
 					ImGui::SetTooltip("Fill the margins beside the screen with its rightmost column, stretched");
@@ -2079,7 +2079,7 @@ int main(int argC, char* argV[]) {
 
 #ifndef WASM_BUILD
 	int screenSidesShown;
-	if(WindowSizes::LoadValue(MAIN_WINDOW_SETTINGS, SCREEN_SIDES_KEY, screenSidesShown)) {
+	if(Settings::LoadValue(MAIN_WINDOW_SETTINGS, SCREEN_SIDES_KEY, screenSidesShown)) {
 		showScreenSides = (screenSidesShown != 0);
 	}
 #endif

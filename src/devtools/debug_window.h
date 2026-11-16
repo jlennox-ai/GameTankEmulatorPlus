@@ -19,7 +19,7 @@ protected:
 public:
     // Render() returns the window's size, which is applied once, on the first frame.
     // sizeName: makes the window resizable, and remembers the size and position it's left at
-    // under that name (WindowSizes): the next time, it opens there at that size instead of
+    // under that name (Settings): the next time, it opens there at that size instead of
     // Render()'s.
     DebugWindow(const char* title, const char* sizeName = nullptr);
     virtual ~DebugWindow();

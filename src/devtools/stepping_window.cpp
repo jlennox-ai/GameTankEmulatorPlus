@@ -6,7 +6,7 @@
 #include "source_map.h"
 #include "source_stepper.h"
 #include "variable_map.h"
-#include "window_sizes.h"
+#include "settings.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -325,7 +325,7 @@ void SteppingWindow::ShowPcCode() {
 
 void SteppingWindow::ToggleMemoryPane() {
     memory_pane_shown = !memory_pane_shown;
-    WindowSizes::SaveValue(SIZE_NAME, MEMORY_PANE_KEY, memory_pane_shown ? 1 : 0);
+    Settings::SaveValue(SIZE_NAME, MEMORY_PANE_KEY, memory_pane_shown ? 1 : 0);
     // The window grows by the pane, so the debugger beside it keeps its size, and shrinks back.
     int pane_width = (int) (MemoryView::PreferredWidth() + ImGui::GetStyle().ItemSpacing.x);
     int width;

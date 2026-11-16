@@ -13,7 +13,7 @@
 // Each view has its own of all of these.
 class MemoryView {
 public:
-    // saveName and topRowKey: where its scroll position is kept (WindowSizes).
+    // saveName and topRowKey: where its scroll position is kept (Settings).
     MemoryView(MemoryMap*& memorymap, std::function<uint8_t(uint16_t, bool)> mem_read, const char* saveName,
         const char* topRowKey);
     ~MemoryView();
