@@ -1,5 +1,7 @@
 #include "debug_window.h"
+#include "window_sizes.h"
 #include "memory_map.h"
+#include "memory_view.h"
 #include "variable_map.h"
 #include "../timekeeper.h"
 #include <functional>
@@ -10,6 +12,9 @@
 
 class SteppingWindow : public DebugWindow {
 private:
+    static constexpr const char* SIZE_NAME = "code_stepper";
+    static constexpr const char* MEMORY_PANE_KEY = "memory_pane";
+
     Timekeeper& timekeeper;
     MemoryMap*& memorymap;
     mos6502* cpu;
@@ -19,6 +24,12 @@ private:
     const std::function<uint8_t(uint16_t, bool)> mem_read;
     // Shows size bytes at an address in the memory browser (opening it if it's closed).
     const std::function<void(uint16_t, uint32_t)> show_memory;
+    // The memory pane at the window's right (the Memory button), and whether it's shown (kept
+    // between runs). While it is, a clicked variable shows there, not in the memory browser.
+    MemoryView memory_pane;
+    bool memory_pane_shown = false;
+    // Shows or hides it, widening or narrowing the window by it.
+    void ToggleMemoryPane();
     // The source line the Source tab last scrolled to, so it only scrolls when that changes.
     std::string last_scrolled_file;
     int last_scrolled_line = -1;
@@ -56,12 +67,16 @@ public:
         CartridgeState& cartridgestate,
         std::function<uint8_t(uint16_t, bool)> mem_read,
         std::function<void(uint16_t, uint32_t)> show_memory) :
-        DebugWindow("Debugger", "code_stepper"),
+        DebugWindow("Debugger", SIZE_NAME),
         timekeeper(timekeeper),
         memorymap(memorymap),
         cpu(cpu),
         gameconfig(gameconfig),
         cartridgestate(cartridgestate),
         mem_read(mem_read),
-        show_memory(show_memory){};
+        show_memory(show_memory),
+        memory_pane(memorymap, mem_read, SIZE_NAME, "memory_top_row") {
+        int shown = 0;
+        memory_pane_shown = WindowSizes::LoadValue(SIZE_NAME, MEMORY_PANE_KEY, shown) && (shown != 0);
+    };
 };

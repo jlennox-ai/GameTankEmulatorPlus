@@ -6,6 +6,8 @@
 #include "source_map.h"
 #include "source_stepper.h"
 #include "variable_map.h"
+#include "window_sizes.h"
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <string>
@@ -276,9 +278,14 @@ void SteppingWindow::RenderSourceLine(const std::string& text, ImVec4 color) {
     uint32_t size;
     if(Locate(under_mouse->chain, address, size)) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        ImGui::SetTooltip("%s\nClick to show it in the memory browser", Describe(under_mouse->chain).c_str());
+        ImGui::SetTooltip(memory_pane_shown ? "%s\nClick to show it in the memory pane" : "%s\nClick to show it in the memory browser",
+            Describe(under_mouse->chain).c_str());
         if(ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-            show_memory(address, size);
+            if(memory_pane_shown) {
+                memory_pane.ShowMemory(address, size);
+            } else {
+                show_memory(address, size);
+            }
         }
     } else {
         ImGui::SetTooltip("%s", Describe(under_mouse->chain).c_str());
@@ -314,6 +321,17 @@ void SteppingWindow::ShowPcCode() {
         // Also after a stop that didn't decode it (a pause).
         Disassembler::Decode(mem_read, memorymap, cpu->pc, 32);
     }
+}
+
+void SteppingWindow::ToggleMemoryPane() {
+    memory_pane_shown = !memory_pane_shown;
+    WindowSizes::SaveValue(SIZE_NAME, MEMORY_PANE_KEY, memory_pane_shown ? 1 : 0);
+    // The window grows by the pane, so the debugger beside it keeps its size, and shrinks back.
+    int pane_width = (int) (MemoryView::PreferredWidth() + ImGui::GetStyle().ItemSpacing.x);
+    int width;
+    int height;
+    SDL_GetWindowSize(window, &width, &height);
+    SDL_SetWindowSize(window, memory_pane_shown ? (width + pane_width) : std::max(width - pane_width, pane_width), height);
 }
 
 ImVec2 SteppingWindow::Render() {
@@ -364,6 +382,31 @@ ImVec2 SteppingWindow::Render() {
     if((timekeeper.clock_mode == CLOCKMODE_STEPSOURCE) || (timekeeper.clock_mode == CLOCKMODE_STEPOUT)) {
         ImGui::SameLine();
         ImGui::Text("Stepping... (Continue or Step cancels)");
+    }
+    // The memory pane's button, at the right end of the row (never over the others), drawn
+    // pressed while the pane is shown.
+    const char* pane_label = "Memory";
+    float pane_button_width = ImGui::CalcTextSize(pane_label).x + (ImGui::GetStyle().FramePadding.x * 2);
+    ImGui::SameLine();
+    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - pane_button_width));
+    bool pane_was_shown = memory_pane_shown;
+    if(pane_was_shown) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+    }
+    if(ImGui::Button(pane_label)) {
+        ToggleMemoryPane();
+    }
+    if(pane_was_shown) {
+        ImGui::PopStyleColor();
+    }
+    if(ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(memory_pane_shown ? "Hide the memory pane" : "Show memory beside the code");
+    }
+
+    // With the memory pane, the rest of the debugger is the left pane.
+    float pane_width = MemoryView::PreferredWidth();
+    if(memory_pane_shown) {
+        ImGui::BeginChild("debugger", ImVec2(-(pane_width + ImGui::GetStyle().ItemSpacing.x), 0));
     }
 
     ImGui::Separator();
@@ -636,6 +679,13 @@ ImVec2 SteppingWindow::Render() {
 
     ImGui::EndTabBar();
     tab_to_select = CodeTab::None;
+    if(memory_pane_shown) {
+        ImGui::EndChild();
+        ImGui::SameLine();
+        ImGui::BeginChild("memory pane", ImVec2(0, 0), ImGuiChildFlags_Borders);
+        memory_pane.Render();
+        ImGui::EndChild();
+    }
     sizeOut = ImVec2(480, 640); // the initial size; the window can be resized from there
     ImGui::End();
     return sizeOut;
