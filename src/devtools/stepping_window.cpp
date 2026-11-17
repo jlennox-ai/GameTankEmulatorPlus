@@ -22,31 +22,52 @@ const char* source_file_getter(const std::vector<std::string> &items, int index)
     return "N/A";
 }
 
-// Draws the clickable breakpoint margin in front of a source line. Returns true if a breakpoint was added or removed.
+static const ImU32 breakpoint_enabled_color = IM_COL32(230, 40, 40, 255);
+static const ImU32 breakpoint_disabled_color = IM_COL32(230, 40, 40, 90);
+
+// Draws the clickable breakpoint margin in front of a source line. Returns true if a breakpoint was
+// added, removed, enabled or disabled (so the game config wants saving).
 static bool source_breakpoint_margin(const std::string& file_name, int line) {
     float line_height = ImGui::GetTextLineHeight();
     bool clicked = ImGui::InvisibleButton("##breakpoint margin", ImVec2(line_height, line_height));
     bool hovered = ImGui::IsItemHovered();
-    bool has_breakpoint = Breakpoints::hasBreakpointNamed(Breakpoints::sourceLineName(file_name, line));
+    Breakpoint* breakpoint = Breakpoints::findBreakpointNamed(Breakpoints::sourceLineName(file_name, line));
+    bool has_breakpoint = (breakpoint != nullptr);
 
     bool has_code = has_breakpoint;
     if(hovered && !has_breakpoint) {
         has_code = SourceMap::singleton->ReverseSearch(file_name, line).found;
     }
 
+    // A breakpoint is a red dot, faded while it's disabled; a line it could go on shows a ring
+    // under the mouse.
     ImVec2 rect_min = ImGui::GetItemRectMin();
     ImVec2 rect_max = ImGui::GetItemRectMax();
     ImVec2 center((rect_min.x + rect_max.x) * 0.5f, (rect_min.y + rect_max.y) * 0.5f);
     float radius = line_height * 0.3f;
     if(has_breakpoint) {
-        ImGui::GetWindowDrawList()->AddCircleFilled(center, radius, IM_COL32(230, 40, 40, 255));
+        ImU32 color = breakpoint->enabled ? breakpoint_enabled_color : breakpoint_disabled_color;
+        ImGui::GetWindowDrawList()->AddCircleFilled(center, radius, color);
     } else if(hovered && has_code) {
-        ImGui::GetWindowDrawList()->AddCircleFilled(center, radius, IM_COL32(230, 40, 40, 80));
+        ImGui::GetWindowDrawList()->AddCircle(center, radius, breakpoint_enabled_color);
+    }
+
+    // Right-click: the breakpoint's menu.
+    bool changed = false;
+    if(has_breakpoint && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+        ImGui::OpenPopup("breakpoint menu");
+    }
+    if(ImGui::BeginPopup("breakpoint menu")) {
+        if(has_breakpoint && ImGui::MenuItem("Enabled", nullptr, &breakpoint->enabled)) {
+            changed = true;
+        }
+        ImGui::EndPopup();
     }
 
     if(hovered) {
         if(has_breakpoint) {
-            ImGui::SetTooltip("Click to remove the breakpoint");
+            ImGui::SetTooltip(breakpoint->enabled ? "Click to remove the breakpoint; right-click to disable it"
+                : "Click to remove the breakpoint (disabled); right-click to enable it");
         } else if(!has_code) {
             ImGui::SetTooltip("No code on this line");
         } else if(Breakpoints::enabled) {
@@ -56,7 +77,7 @@ static bool source_breakpoint_margin(const std::string& file_name, int line) {
         }
     }
 
-    if(!clicked) return false;
+    if(!clicked) return changed;
     return Breakpoints::toggleSourceBreakpoint(*SourceMap::singleton, file_name, line) != SourceBreakpointToggle::NoCode;
 }
 

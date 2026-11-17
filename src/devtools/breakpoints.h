@@ -46,6 +46,8 @@ public:
     // Source line breakpoints are identified by their name, "file:line".
     static std::string sourceLineName(const std::string& fileName, int line);
     static bool hasBreakpointNamed(const std::string& name);
+    // nullptr if there's none; valid until the list next changes.
+    static Breakpoint* findBreakpointNamed(const std::string& name);
     static void addSourceBreakpoint(SourceMap& sourceMap, const std::string& fileName, int line, uint16_t address,
         uint8_t bank);
     // Finds each source line breakpoint's line again in the source as it is now (by its text,

@@ -45,8 +45,13 @@ std::string Breakpoints::sourceLineName(const std::string& fileName, int line) {
     return fileName + ":" + std::to_string(line);
 }
 
+Breakpoint* Breakpoints::findBreakpointNamed(const std::string& name) {
+    auto found = std::find_if(begin(breakpoints), end(breakpoints), [&name](const Breakpoint& bp) { return bp.name == name; });
+    return (found == end(breakpoints)) ? nullptr : &*found;
+}
+
 bool Breakpoints::hasBreakpointNamed(const std::string& name) {
-    return std::any_of(begin(breakpoints), end(breakpoints), [&name](const Breakpoint& bp) { return bp.name == name; });
+    return findBreakpointNamed(name) != nullptr;
 }
 
 // How far either way a source line breakpoint's text is looked for after an edit moves it.
