@@ -163,6 +163,15 @@ void ProfilerWindow::RenderCallTree() {
             called += child.total;
         }
         call_tree.self = (called < call_tree.total) ? (call_tree.total - called) : 0;
+        // The time in no recorded call, as a row of its own: the main loop's own code, say (main
+        // was called before any recording, and never returns).
+        if(call_tree.self > 0) {
+            CallTreeNode outside;
+            outside.name = "(code outside any function)";
+            outside.total = call_tree.self;
+            outside.self = call_tree.self;
+            call_tree.children.push_back(outside);
+        }
         SortCallTree(call_tree);
         call_tree_source = _profiler.DeepProfileNumber();
         focus_path.clear();
@@ -185,8 +194,7 @@ void ProfilerWindow::RenderCallTree() {
         shown = next;
     }
     if(focus_path.empty()) {
-        ImGui::Text("Total: %s cycles, %s of them outside any call", std::to_string(shown->total).c_str(),
-            std::to_string(shown->self).c_str());
+        ImGui::Text("Total: %s cycles", std::to_string(shown->total).c_str());
     } else {
         if(ImGui::Button("<##show all")) {
             focus_path.clear();
