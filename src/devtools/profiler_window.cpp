@@ -2,6 +2,9 @@
 #include "profiler_window.h"
 #include "implot.h"
 #include "../audio_coprocessor.h"
+#include <algorithm>
+#include <cstdio>
+#include <string>
 
 static float prof_R[8] = {1,    1, 1, 0, 0, 0.5f, 0.5f, 1};
 static float prof_G[8] = {0, 0.5f, 1, 1, 0,    0, 0.5f, 1};
@@ -34,6 +37,167 @@ void ProfilerWindow::recurse_tree_nodes(Profiler::DeepProfileCallNode* node, uin
         ImGui::TreePop();
     }
     ImGui::PopID();
+}
+
+void ProfilerWindow::AddCalls(CallTreeNode& into, const std::vector<Profiler::DeepProfileCallNode*>& calls) {
+    for(auto call : calls) {
+        std::string name = call->name.empty() ? "(no symbol)" : call->name;
+        CallTreeNode* merged = nullptr;
+        for(auto& existing : into.children) {
+            if(existing.name == name) {
+                merged = &existing;
+                break;
+            }
+        }
+        if(merged == nullptr) {
+            into.children.emplace_back();
+            merged = &into.children.back();
+            merged->name = name;
+        }
+        uint64_t callee_cycles = 0;
+        for(auto callee : call->children) {
+            callee_cycles += callee->duration;
+        }
+        merged->total += call->duration;
+        merged->self += (callee_cycles < call->duration) ? (call->duration - callee_cycles) : 0;
+        merged->calls += 1;
+        AddCalls(*merged, call->children);
+    }
+}
+
+void ProfilerWindow::SortCallTree(CallTreeNode& node) {
+    auto before = [this](const CallTreeNode& first, const CallTreeNode& second) {
+        const CallTreeNode& left = sort_descending ? second : first;
+        const CallTreeNode& right = sort_descending ? first : second;
+        switch(sort_column) {
+            case CallTreeColumn::Function: return left.name < right.name;
+            case CallTreeColumn::Self: return left.self < right.self;
+            case CallTreeColumn::Total: return left.total < right.total;
+        }
+        return false;
+    };
+    std::stable_sort(node.children.begin(), node.children.end(), before);
+    for(auto& child : node.children) {
+        SortCallTree(child);
+    }
+}
+
+// "12345 (12.3%)" of the total shown.
+static std::string cycles_and_share(uint64_t cycles, uint64_t shownTotal) {
+    char share[16];
+    std::snprintf(share, sizeof(share), "%.1f%%", (shownTotal == 0) ? 0.0 : (100.0 * (double) cycles / (double) shownTotal));
+    return std::to_string(cycles) + " (" + share + ")";
+}
+
+void ProfilerWindow::RenderCallTreeRow(const CallTreeNode& node, uint64_t shownTotal, std::vector<std::string>& path) {
+    path.push_back(node.name);
+    ImGui::PushID(node.name.c_str());
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn();
+    bool leaf = node.children.empty();
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAllColumns
+        | (leaf ? (ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen) : ImGuiTreeNodeFlags_None);
+    std::string label = node.name + ((node.calls > 1) ? ("  (" + std::to_string(node.calls) + " calls)") : "");
+    bool open = ImGui::TreeNodeEx("##call", flags, "%s", label.c_str());
+    if(ImGui::BeginPopupContextItem("call menu")) {
+        if(ImGui::MenuItem("Show only this")) {
+            focus_path = path;
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::TableNextColumn();
+    ImGui::TextUnformatted(cycles_and_share(node.self, shownTotal).c_str());
+    ImGui::TableNextColumn();
+    ImGui::TextUnformatted(cycles_and_share(node.total, shownTotal).c_str());
+    if(open && !leaf) {
+        for(auto& child : node.children) {
+            RenderCallTreeRow(child, shownTotal, path);
+        }
+        ImGui::TreePop();
+    }
+    ImGui::PopID();
+    path.pop_back();
+}
+
+void ProfilerWindow::RenderCallTree() {
+    const Profiler::DeepProfileCallNode* root = _profiler.lastDeepProfileRoot;
+    if(root == nullptr) {
+        ImGui::Text("Run a deep profile (Tools > Deep Profile) to see results here");
+        return;
+    }
+    if(call_tree_source != root) {
+        call_tree = CallTreeNode();
+        call_tree.name = "root";
+        call_tree.total = root->duration;
+        call_tree.calls = 1;
+        AddCalls(call_tree, root->children);
+        uint64_t called = 0;
+        for(auto& child : call_tree.children) {
+            called += child.total;
+        }
+        call_tree.self = (called < call_tree.total) ? (call_tree.total - called) : 0;
+        SortCallTree(call_tree);
+        call_tree_source = root;
+        focus_path.clear();
+    }
+
+    // What's shown as the root: all of it, or the node "Show only this" picked.
+    const CallTreeNode* shown = &call_tree;
+    for(auto& name : focus_path) {
+        const CallTreeNode* next = nullptr;
+        for(auto& child : shown->children) {
+            if(child.name == name) {
+                next = &child;
+            }
+        }
+        if(next == nullptr) {
+            focus_path.clear();
+            shown = &call_tree;
+            break;
+        }
+        shown = next;
+    }
+    if(focus_path.empty()) {
+        ImGui::Text("Total: %s cycles, %s of them outside any call", std::to_string(shown->total).c_str(),
+            std::to_string(shown->self).c_str());
+    } else {
+        if(ImGui::Button("<##show all")) {
+            focus_path.clear();
+        }
+        ImGui::SameLine();
+        std::string trail;
+        for(auto& name : focus_path) {
+            trail += (trail.empty() ? "" : " > ") + name;
+        }
+        ImGui::Text("%s: %s cycles", trail.c_str(), std::to_string(shown->total).c_str());
+    }
+
+    ImGuiTableFlags table_flags = ImGuiTableFlags_Resizable | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersV
+        | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable;
+    if(!ImGui::BeginTable("call tree", 3, table_flags)) {
+        return;
+    }
+    float time_width = ImGui::CalcTextSize("0000000 (100.0%)").x;
+    ImGui::TableSetupScrollFreeze(0, 1);
+    ImGui::TableSetupColumn("Function", ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_NoHide, 0,
+        (ImGuiID) CallTreeColumn::Function);
+    ImGui::TableSetupColumn("Self", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending,
+        time_width, (ImGuiID) CallTreeColumn::Self);
+    ImGui::TableSetupColumn("Total", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending
+        | ImGuiTableColumnFlags_DefaultSort, time_width, (ImGuiID) CallTreeColumn::Total);
+    ImGui::TableHeadersRow();
+    ImGuiTableSortSpecs* sort_specs = ImGui::TableGetSortSpecs();
+    if((sort_specs != nullptr) && sort_specs->SpecsDirty && (sort_specs->SpecsCount > 0)) {
+        sort_column = (CallTreeColumn) sort_specs->Specs[0].ColumnUserID;
+        sort_descending = (sort_specs->Specs[0].SortDirection == ImGuiSortDirection_Descending);
+        SortCallTree(call_tree);
+        sort_specs->SpecsDirty = false;
+    }
+    std::vector<std::string> path = focus_path;
+    for(auto& child : shown->children) {
+        RenderCallTreeRow(child, shown->total, path);
+    }
+    ImGui::EndTable();
 }
 
 ImVec2 ProfilerWindow::Render() {
@@ -121,6 +285,10 @@ ImVec2 ProfilerWindow::Render() {
                 }
             }
         }
+        ImGui::EndTabItem();
+    }
+    if(ImGui::BeginTabItem("Call Tree")) {
+        RenderCallTree();
         ImGui::EndTabItem();
     }
     ImGui::EndTabBar();
