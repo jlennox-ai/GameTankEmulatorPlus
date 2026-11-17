@@ -1072,7 +1072,7 @@ bool toolTypeIsOpen() {
 
 void toggleProfilerWindow() {
 	if(!toolTypeIsOpen<ProfilerWindow>()) {
-		toolWindows.push_back(new ProfilerWindow(profiler));
+		toolWindows.push_back(new ProfilerWindow(profiler, loadedMemoryMap));
 	} else {
 		closeToolByType<ProfilerWindow>();
 	}

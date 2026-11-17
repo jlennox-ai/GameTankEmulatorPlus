@@ -78,6 +78,20 @@ const Symbol& MemoryMap::GetAt(int i) const {
     return symbols.at(i);
 }
 
+bool MemoryMap::FindContaining(uint16_t address, Symbol* result) const {
+    const Symbol* best = nullptr;
+    for(auto& sym : symbols) {
+        if((sym.address <= address) && ((best == nullptr) || (sym.address > best->address))) {
+            best = &sym;
+        }
+    }
+    if(best == nullptr) {
+        return false;
+    }
+    *result = *best;
+    return true;
+}
+
 bool MemoryMap::FindAddress(uint16_t address, Symbol* result) const {
     for(auto sym : symbols) {
         if(sym.address == address) {

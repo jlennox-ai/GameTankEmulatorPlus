@@ -7,6 +7,8 @@
 class ProfilerWindow : public DebugWindow {
 private:
     Profiler& _profiler;
+    // For naming the calls in a deep profile stopped from the window.
+    MemoryMap*& memorymap;
     ImVec2 Render();
     float max_scale = 2.0f;
     bool profilerVis[PROFILER_ENTRIES] = {0};
@@ -24,8 +26,8 @@ private:
     };
     enum class CallTreeColumn { Function, Self, Total };
     CallTreeNode call_tree;
-    // The profile the tree was built from, to rebuild it after a new one.
-    const Profiler::DeepProfileCallNode* call_tree_source = nullptr;
+    // The profile the tree was built from (Profiler::DeepProfileNumber), to rebuild it after a new one.
+    uint32_t call_tree_source = 0;
     CallTreeColumn sort_column = CallTreeColumn::Total;
     bool sort_descending = true;
     // "Show only this": the names from the root down to the node shown as the root (empty: all).
@@ -35,6 +37,10 @@ private:
     void SortCallTree(CallTreeNode& node);
     void RenderCallTree();
     void RenderCallTreeRow(const CallTreeNode& node, uint64_t shownTotal, std::vector<std::string>& path);
+    // Start and Stop for a deep profile of any length, and how the recording is going: the top
+    // of the Deep Profile and Call Tree tabs.
+    void RenderRecordingControls();
 public:
-    ProfilerWindow(Profiler& profiler): DebugWindow("Profiler", "profiler"), _profiler(profiler) {};
+    ProfilerWindow(Profiler& profiler, MemoryMap*& memorymap):
+        DebugWindow("Profiler", "profiler"), _profiler(profiler), memorymap(memorymap) {};
 };

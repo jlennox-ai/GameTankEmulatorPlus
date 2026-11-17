@@ -24,6 +24,8 @@ class MemoryMap {
         int size() const;
         const Symbol& GetAt(int i) const;
         bool FindAddress(uint16_t address, Symbol* result) const;
+        // The symbol an address is in: the one at it or the nearest before it. False if there's none.
+        bool FindContaining(uint16_t address, Symbol* result) const;
         bool FindName(uint16_t &address, std::string name) const;
 };
 

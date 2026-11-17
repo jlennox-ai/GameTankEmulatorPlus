@@ -32,15 +32,21 @@ public:
         public:
         std::string name;
         SourceMapLine line;
-        uint32_t duration;
-        uint32_t offset;
+        // In cycles: 64-bit, like the cycle count they're taken from (32 bits wrap after about 20
+        // minutes of emulation).
+        uint64_t duration;
+        uint64_t offset;
         std::vector<DeepProfileCallNode*> children;
     };
 
 private:
     Timekeeper& timekeeper;
-    bool deepProfileIsRecording;
-    uint64_t deepProfileStartCycleCount;
+    bool deepProfileIsRecording = false;
+    // Started by the Profiler window's Start (stopped by its Stop), not a timed capture.
+    bool deepProfileIsManual = false;
+    uint64_t deepProfileStartCycleCount = 0;
+    uint64_t deepProfileCallCount = 0;
+    uint32_t deepProfileNumber = 0;
 
     std::string profileEventTypeToString(ProfileEventType type);
     void recursiveNodePrintToFile(std::ofstream& file, DeepProfileCallNode* node, uint16_t depth);
@@ -65,8 +71,16 @@ public:
     std::vector<ProfileEvent> timeline;
     void LogJSR(uint16_t address, uint8_t bank, uint16_t dest);
     void LogRTS(uint16_t address, uint8_t bank);
-    void DeepProfileStart();
+    // manual: started by the Profiler window, to run until its Stop.
+    void DeepProfileStart(bool manual = false);
     void DeepProfileStop(MemoryMap* memory_map, SourceMap* source_map);
+    bool IsDeepProfileRecording() const { return deepProfileIsRecording; }
+    bool IsDeepProfileManual() const { return deepProfileIsManual; }
+    // The recording so far: its length in seconds of emulated time, and the calls in it.
+    double DeepProfileRecordedSeconds() const;
+    uint64_t DeepProfileRecordedCalls() const { return deepProfileCallCount; }
+    // Counts finished deep profiles, so a view of one can tell a new one has replaced it.
+    uint32_t DeepProfileNumber() const { return deepProfileNumber; }
     DeepProfileCallNode* lastDeepProfileRoot;
     DeepProfileCallNode* deepProfileZoomFocus;
     std::vector<DeepProfileCallNode*> cleanupList;

@@ -31,6 +31,7 @@ void Profiler::ResetTimers() {
 void Profiler::LogJSR(uint16_t address, uint8_t bank, uint16_t destination) {
     if(deepProfileIsRecording) {
         timeline.emplace_back(ProfileEventType::CALL, address, destination, bank, timekeeper.totalCyclesCount);
+        ++deepProfileCallCount;
     }
 }
 
@@ -40,8 +41,14 @@ void Profiler::LogRTS(uint16_t address, uint8_t bank) {
     }
 }
 
-void Profiler::DeepProfileStart() {
+double Profiler::DeepProfileRecordedSeconds() const {
+    return (double) (timekeeper.totalCyclesCount - deepProfileStartCycleCount) / (double) timekeeper.system_clock;
+}
+
+void Profiler::DeepProfileStart(bool manual) {
     deepProfileIsRecording = true;
+    deepProfileIsManual = manual;
+    deepProfileCallCount = 0;
     deepProfileStartCycleCount = timekeeper.totalCyclesCount;
     lastDeepProfileRoot = nullptr;
     deepProfileZoomFocus = nullptr;
@@ -130,11 +137,34 @@ void Profiler::exportTimelineToJSON(const std::vector<ProfileEvent>& timeline, c
                 }
                 returningNode->duration = event.cycle_number - returningNode->duration;
                 parent->children.push_back(returningNode);
+            } else {
+                // The return from a call made before the recording started (it began part-way
+                // through a function): everything at the top level so far was inside it.
+                DeepProfileCallNode* earlier = new DeepProfileCallNode();
+                cleanupList.push_back(earlier);
+                Symbol containing;
+                bool named = (memory_map != nullptr) && memory_map->FindContaining(event.origin, &containing);
+                earlier->name = (named ? containing.name : "(unknown)") + " (called before recording)";
+                earlier->offset = 0;
+                earlier->duration = event.cycle_number - deepProfileStartCycleCount;
+                earlier->children = std::move(rootNode->children);
+                rootNode->children.clear();
+                rootNode->children.push_back(earlier);
             }
         }
     }
 
+    // Calls still running when the recording stopped end there, with what they'd called so far.
+    while(!callstack.empty()) {
+        DeepProfileCallNode* running = callstack.top();
+        callstack.pop();
+        running->duration = timekeeper.totalCyclesCount - running->duration;
+        DeepProfileCallNode* parent = callstack.empty() ? rootNode : callstack.top();
+        parent->children.push_back(running);
+    }
+
     lastDeepProfileRoot = rootNode;
+    ++deepProfileNumber;
 
     /*std::ofstream file(filename);
     if (!file.is_open()) {

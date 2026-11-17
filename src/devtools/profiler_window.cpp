@@ -12,7 +12,7 @@ static float prof_B[8] = {0,    0, 0, 0, 1, 0.5f, 0.5f, 1};
 
 void ProfilerWindow::recurse_tree_nodes(Profiler::DeepProfileCallNode* node, uint64_t totalCycles, uint64_t startTime) {
     ImGui::PushID(node);
-    bool opened = ImGui::TreeNode(node, "%s : %d", node->name.c_str(), node->duration);
+    bool opened = ImGui::TreeNode(node, "%s : %s", node->name.c_str(), std::to_string(node->duration).c_str());
     ImGui::SameLine(ImGui::GetWindowWidth()-288);
     if(ImGui::Button(">")) {
         _profiler.deepProfileZoomFocus = node;
@@ -119,13 +119,40 @@ void ProfilerWindow::RenderCallTreeRow(const CallTreeNode& node, uint64_t shownT
     path.pop_back();
 }
 
+void ProfilerWindow::RenderRecordingControls() {
+    if(!_profiler.IsDeepProfileRecording()) {
+        if(ImGui::Button("Start")) {
+            _profiler.DeepProfileStart(true);
+        }
+        if(ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Record every call until Stop (Tools > Deep Profile has timed captures)");
+        }
+        ImGui::Separator();
+        return;
+    }
+    // A timed capture from Tools > Deep Profile stops by itself.
+    bool manual = _profiler.IsDeepProfileManual();
+    ImGui::BeginDisabled(!manual);
+    if(ImGui::Button("Stop")) {
+        _profiler.DeepProfileStop(memorymap, SourceMap::singleton);
+    }
+    ImGui::EndDisabled();
+    if(!manual && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("A timed capture is running; it stops by itself");
+    }
+    ImGui::SameLine();
+    ImGui::Text("Recording: %.1f s, %s calls", _profiler.DeepProfileRecordedSeconds(),
+        std::to_string(_profiler.DeepProfileRecordedCalls()).c_str());
+    ImGui::Separator();
+}
+
 void ProfilerWindow::RenderCallTree() {
     const Profiler::DeepProfileCallNode* root = _profiler.lastDeepProfileRoot;
     if(root == nullptr) {
         ImGui::Text("Run a deep profile (Tools > Deep Profile) to see results here");
         return;
     }
-    if(call_tree_source != root) {
+    if(call_tree_source != _profiler.DeepProfileNumber()) {
         call_tree = CallTreeNode();
         call_tree.name = "root";
         call_tree.total = root->duration;
@@ -137,7 +164,7 @@ void ProfilerWindow::RenderCallTree() {
         }
         call_tree.self = (called < call_tree.total) ? (call_tree.total - called) : 0;
         SortCallTree(call_tree);
-        call_tree_source = root;
+        call_tree_source = _profiler.DeepProfileNumber();
         focus_path.clear();
     }
 
@@ -264,17 +291,19 @@ ImVec2 ProfilerWindow::Render() {
     }
 
     if(ImGui::BeginTabItem("Deep Profile")) {
+        RenderRecordingControls();
         if(_profiler.lastDeepProfileRoot == nullptr) {
             ImGui::Text("Run a deep profile to see results here");
         } else {
 
             if(_profiler.deepProfileZoomFocus == nullptr) {
-                ImGui::Text("Total: %d cycles", _profiler.lastDeepProfileRoot->duration);
+                ImGui::Text("Total: %s cycles", std::to_string(_profiler.lastDeepProfileRoot->duration).c_str());
                 for(auto& node : _profiler.lastDeepProfileRoot->children) {
                     recurse_tree_nodes(node, _profiler.lastDeepProfileRoot->duration, 0);
                 }
             } else {
-                ImGui::Text("%s: %d cycles", _profiler.deepProfileZoomFocus->name.c_str(), _profiler.deepProfileZoomFocus->duration);
+                ImGui::Text("%s: %s cycles", _profiler.deepProfileZoomFocus->name.c_str(),
+                    std::to_string(_profiler.deepProfileZoomFocus->duration).c_str());
                 ImGui::SameLine();
                 if(ImGui::Button("<##unzoom")) {
                     _profiler.deepProfileZoomFocus = nullptr;
@@ -288,6 +317,7 @@ ImVec2 ProfilerWindow::Render() {
         ImGui::EndTabItem();
     }
     if(ImGui::BeginTabItem("Call Tree")) {
+        RenderRecordingControls();
         RenderCallTree();
         ImGui::EndTabItem();
     }
