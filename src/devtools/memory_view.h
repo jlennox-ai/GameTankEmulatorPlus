@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 #include "imgui.h"
 #include "memory_map.h"
 #include "variable_map.h"
@@ -43,6 +44,16 @@ private:
     // The goto box: an address in hex, or a symbol from the memory map.
     char goto_text[64] = { 0 };
     bool goto_failed = false;
+    // The goto history, shared by every view: the last gotos that went somewhere, latest first,
+    // each once, kept between runs.
+    static std::vector<std::string> goto_history;
+    static bool goto_history_loaded;
+    // The history's dropdown under the goto box: open from when the box is clicked; narrowed to
+    // what's been typed since; the entry the arrow keys are on (-1: none).
+    bool history_open = false;
+    std::string history_filter;
+    std::string goto_text_seen; // the box's text last frame, to notice typing
+    int history_cursor = -1;
     // The selection, for copying: the byte clicked first and the one it reaches to (either way
     // round), and whether a drag is extending it.
     bool has_selection = false;
@@ -63,6 +74,14 @@ private:
     // Saves the top row, at most every so often while scrolling (it writes a file).
     void SaveTopRow(bool now);
     void Goto();
+    // Puts text in the goto box and goes there.
+    void GotoText(const std::string& text);
+    // Puts a goto at the top of the history (moving it there if it's already in it) and saves it.
+    static void RememberGoto(const std::string& text);
+    // The history entries the dropdown shows: those with the text typed since the box was clicked.
+    std::vector<std::string> HistoryMatches() const;
+    void RenderGotoBox(bool focused);
+    void RenderHistoryDropdown(ImVec2 position, float width, const std::vector<std::string>& matches, bool inputActive);
     // The selected bytes, as "aa bb cc".
     std::string SelectionText();
     void RenderGrid(int& hovered_address);

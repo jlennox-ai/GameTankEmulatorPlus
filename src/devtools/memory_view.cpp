@@ -1,6 +1,9 @@
 #include "memory_view.h"
 #include <algorithm>
+#include <cctype>
+#include <cfloat>
 #include <cstdio>
+#include "imgui_internal.h"
 #include "../SDL_inc.h"
 #include "settings.h"
 
@@ -9,6 +12,14 @@
 // Where the highlighted row lands when scrolled to: a little above the middle.
 #define HIGHLIGHT_SCROLL_RATIO 0.3f
 #define TOP_ROW_SAVE_INTERVAL_MS 1000
+#define GOTO_HISTORY_SIZE 30
+#define HISTORY_DROPDOWN_ROWS 12
+// Where the goto history is kept (Settings): shared by the views, so not under any one's name.
+static const char* GOTO_HISTORY_SETTINGS = "memory_view";
+static const char* GOTO_HISTORY_KEY = "goto_history";
+
+std::vector<std::string> MemoryView::goto_history;
+bool MemoryView::goto_history_loaded = false;
 
 static const char* column_headers[ROW_BYTES + 1] = {
     " ",
@@ -32,6 +43,13 @@ MemoryView::MemoryView(MemoryMap*& memorymap, std::function<uint8_t(uint16_t, bo
     top_row_key(topRowKey) {
     if(Settings::LoadValue(save_name, top_row_key.c_str(), saved_top_row)) {
         row_to_restore = saved_top_row;
+    }
+    if(!goto_history_loaded) {
+        Settings::LoadStrings(GOTO_HISTORY_SETTINGS, GOTO_HISTORY_KEY, goto_history);
+        if(goto_history.size() > GOTO_HISTORY_SIZE) {
+            goto_history.resize(GOTO_HISTORY_SIZE);
+        }
+        goto_history_loaded = true;
     }
 }
 
@@ -77,6 +95,7 @@ void MemoryView::Goto() {
     if((memorymap != nullptr) && memorymap->FindName(address, text)) {
         goto_failed = false;
         ShowMemory(address, 1);
+        RememberGoto(text);
         return;
     }
     std::string digits = text;
@@ -90,6 +109,7 @@ void MemoryView::Goto() {
     goto_failed = !all_hex;
     if(all_hex) {
         ShowMemory((uint16_t) std::stoul(digits, nullptr, 16), 1);
+        RememberGoto(text);
     }
 }
 
@@ -108,26 +128,121 @@ std::string MemoryView::SelectionText() {
     return text;
 }
 
-void MemoryView::Render() {
+void MemoryView::RememberGoto(const std::string& text) {
+    goto_history.erase(std::remove(goto_history.begin(), goto_history.end(), text), goto_history.end());
+    goto_history.insert(goto_history.begin(), text);
+    if(goto_history.size() > GOTO_HISTORY_SIZE) {
+        goto_history.resize(GOTO_HISTORY_SIZE);
+    }
+    Settings::SaveStrings(GOTO_HISTORY_SETTINGS, GOTO_HISTORY_KEY, goto_history);
+}
+
+void MemoryView::GotoText(const std::string& text) {
+    std::snprintf(goto_text, sizeof(goto_text), "%s", text.c_str());
+    goto_text_seen = goto_text;
+    history_open = false;
+    Goto();
+}
+
+std::vector<std::string> MemoryView::HistoryMatches() const {
+    std::string filter = history_filter;
+    std::transform(filter.begin(), filter.end(), filter.begin(), [](unsigned char character) { return std::tolower(character); });
+    std::vector<std::string> matches;
+    for(auto& entry : goto_history) {
+        std::string lower = entry;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char character) { return std::tolower(character); });
+        if(lower.find(filter) != std::string::npos) {
+            matches.push_back(entry);
+        }
+    }
+    return matches;
+}
+
+void MemoryView::RenderGotoBox(bool focused) {
     const ImGuiIO& io = ImGui::GetIO();
-    // The view's shortcuts work while it (not just the window it's in) has the focus.
-    bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
     // Ctrl+G: to the goto box, its text selected to type over.
     if(focused && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_G, false)) {
         ImGui::SetKeyboardFocusHere();
     }
     const char* goto_hint = "address or symbol (Ctrl+G)";
-    ImGui::SetNextItemWidth(ImGui::CalcTextSize(goto_hint).x + (ImGui::GetStyle().FramePadding.x * 2));
+    float box_width = ImGui::CalcTextSize(goto_hint).x + (ImGui::GetStyle().FramePadding.x * 2);
+    ImGui::SetNextItemWidth(box_width);
     bool entered = ImGui::InputTextWithHint("##goto", goto_hint, goto_text, sizeof(goto_text),
         ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+    bool box_active = ImGui::IsItemActive();
+    ImVec2 under_box(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y);
+
+    // Clicking into the box opens the history, all of it; typing narrows it.
+    if(ImGui::IsItemActivated()) {
+        history_open = true;
+        history_filter.clear();
+        history_cursor = -1;
+        goto_text_seen = goto_text;
+    } else if(box_active && (goto_text_seen != goto_text)) {
+        history_filter = goto_text;
+        history_cursor = -1;
+        goto_text_seen = goto_text;
+    }
+    std::vector<std::string> matches = HistoryMatches();
+    if(box_active && history_open && !matches.empty()) {
+        if(ImGui::IsKeyPressed(ImGuiKey_DownArrow)) {
+            history_cursor = std::min(history_cursor + 1, (int) matches.size() - 1);
+        } else if(ImGui::IsKeyPressed(ImGuiKey_UpArrow)) {
+            history_cursor = std::max(history_cursor - 1, -1);
+        }
+    }
+    if(box_active && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        history_open = false;
+    }
+
     ImGui::SameLine();
-    if(ImGui::Button("Go") || entered) {
+    bool go_clicked = ImGui::Button("Go");
+    if(entered && history_open && (history_cursor >= 0) && (history_cursor < (int) matches.size())) {
+        GotoText(matches[history_cursor]);
+    } else if(entered || go_clicked) {
+        history_open = false;
         Goto();
     }
     if(goto_failed) {
         ImGui::SameLine();
         ImGui::TextColored(goto_failed_color, "not an address or symbol");
     }
+    if(history_open && !matches.empty()) {
+        RenderHistoryDropdown(under_box, box_width, matches, box_active);
+    }
+}
+
+// A window of its own over the view, so it can stay open while the box keeps the keyboard.
+void MemoryView::RenderHistoryDropdown(ImVec2 position, float width, const std::vector<std::string>& matches,
+    bool inputActive) {
+    ImGui::SetNextWindowPos(position);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(width, 0),
+        ImVec2(FLT_MAX, ImGui::GetTextLineHeightWithSpacing() * HISTORY_DROPDOWN_ROWS));
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize
+        | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing
+        | ImGuiWindowFlags_NoNav;
+    ImGui::Begin("##goto history", nullptr, flags);
+    ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
+    for(int i = 0; i < (int) matches.size(); ++i) {
+        if(ImGui::Selectable(matches[i].c_str(), i == history_cursor)) {
+            GotoText(matches[i]);
+        }
+        if(i == history_cursor) {
+            ImGui::SetScrollHereY();
+        }
+    }
+    // Open while the box has the keyboard, or the list is being clicked; closed by anything else.
+    if(!inputActive && !ImGui::IsWindowFocused() && !ImGui::IsWindowHovered()) {
+        history_open = false;
+    }
+    ImGui::End();
+}
+
+void MemoryView::Render() {
+    const ImGuiIO& io = ImGui::GetIO();
+    // The view's shortcuts work while it (not just the window it's in) has the focus.
+    bool focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
+    RenderGotoBox(focused);
 
     int hovered_address = -1;
     RenderGrid(hovered_address);

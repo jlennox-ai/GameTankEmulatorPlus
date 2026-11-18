@@ -80,18 +80,54 @@ void Settings::SaveValue(const std::string& windowName, const char* key, int val
     SaveValues(windowName, { { key, value } });
 }
 
+bool Settings::LoadStrings(const std::string& windowName, const char* key, std::vector<std::string>& strings) {
+    if(!fileRead) {
+        ReadFile();
+    }
+    const toml::array* saved = values[windowName][key].as_array();
+    if(saved == nullptr) {
+        return false;
+    }
+    strings.clear();
+    for(auto& element : *saved) {
+        std::optional<std::string> text = element.value<std::string>();
+        if(!text.has_value()) {
+            std::cerr << "Ignoring a value in the " << windowName << " window's " << key << ", which isn't text" << std::endl;
+            continue;
+        }
+        strings.push_back(*text);
+    }
+    return true;
+}
+
+void Settings::SaveStrings(const std::string& windowName, const char* key, const std::vector<std::string>& strings) {
+    toml::array saved;
+    for(auto& text : strings) {
+        saved.push_back(text);
+    }
+    WindowTable(windowName).insert_or_assign(key, saved);
+    WriteFile();
+}
+
 void Settings::SaveValues(const std::string& windowName, std::initializer_list<std::pair<const char*, int>> entries) {
+    toml::table& window = WindowTable(windowName);
+    for(auto& entry : entries) {
+        window.insert_or_assign(entry.first, entry.second);
+    }
+    WriteFile();
+}
+
+toml::table& Settings::WindowTable(const std::string& windowName) {
     if(!fileRead) {
         ReadFile();
     }
     if(values[windowName].as_table() == nullptr) {
         values.insert_or_assign(windowName, toml::table());
     }
-    toml::table& window = *values[windowName].as_table();
-    for(auto& entry : entries) {
-        window.insert_or_assign(entry.first, entry.second);
-    }
+    return *values[windowName].as_table();
+}
 
+void Settings::WriteFile() {
     std::string path = FilePath();
     std::ofstream file(path, std::ios_base::out | std::ios_base::trunc);
     file << values << "\n";

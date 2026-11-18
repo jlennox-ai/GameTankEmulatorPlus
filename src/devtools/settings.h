@@ -2,12 +2,13 @@
 #include <initializer_list>
 #include <string>
 #include <utility>
+#include <vector>
 #include "../toml/toml.hpp"
 
 // The emulator's settings kept between runs, in settings.toml in its preferences folder: a table
 // per window name, with the size and position the window was last left at and whatever else it
-// keeps (the memory views' scroll positions, whether the debugger shows its memory pane, whether
-// the main window shows the screen's sides).
+// keeps (the memory views' scroll positions and goto history, whether the debugger shows its
+// memory pane, whether the main window shows the screen's sides).
 class Settings {
 public:
     // False: no size is saved for this window yet.
@@ -20,6 +21,10 @@ public:
     // Anything else a window keeps between runs. False: none saved yet.
     static bool LoadValue(const std::string& windowName, const char* key, int& value);
     static void SaveValue(const std::string& windowName, const char* key, int value);
+    // A list of text a window keeps between runs (the memory views' goto history). False: none
+    // saved yet.
+    static bool LoadStrings(const std::string& windowName, const char* key, std::vector<std::string>& strings);
+    static void SaveStrings(const std::string& windowName, const char* key, const std::vector<std::string>& strings);
 
 private:
     static bool fileRead;
@@ -35,4 +40,7 @@ private:
         int second);
     // Sets the window's values and writes the file.
     static void SaveValues(const std::string& windowName, std::initializer_list<std::pair<const char*, int>> entries);
+    // The window's table, made if it has none yet.
+    static toml::table& WindowTable(const std::string& windowName);
+    static void WriteFile();
 };
