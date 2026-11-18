@@ -1,6 +1,7 @@
 #include "debug_window.h"
 #include "settings.h"
 #include "memory_map.h"
+#include "fitting_tooltip.h"
 #include "memory_view.h"
 #include "variable_map.h"
 #include "../timekeeper.h"
@@ -28,6 +29,8 @@ private:
     // between runs). While it is, a clicked variable shows there, not in the memory browser.
     MemoryView memory_pane;
     bool memory_pane_shown = false;
+    // The hovered variable's value, in the source view.
+    FittingTooltip variable_tooltip;
     // Shows or hides it, widening or narrowing the window by it.
     void ToggleMemoryPane();
     // The source line the Source tab last scrolled to, so it only scrolls when that changes.

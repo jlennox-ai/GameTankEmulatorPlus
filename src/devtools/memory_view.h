@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include "imgui.h"
+#include "fitting_tooltip.h"
 #include "memory_map.h"
 #include "variable_map.h"
 
@@ -70,6 +71,7 @@ private:
     // struct and the byte's part of it on the next frame.
     bool hover_owner_shown = false;
     VariableMap::MemoryOwner hover_owner;
+    FittingTooltip owner_tooltip;
 
     // Saves the top row, at most every so often while scrolling (it writes a file).
     void SaveTopRow(bool now);

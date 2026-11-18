@@ -374,7 +374,7 @@ void MemoryView::RenderOwnerTooltip(int hovered_address) {
     if(!hover_owner_shown) {
         return;
     }
-    ImGui::BeginTooltip();
+    owner_tooltip.Begin();
     // Titled by the struct, not the field, so the tooltip keeps its size moving across a struct
     // (the field is its highlighted line).
     ImGui::TextUnformatted(hover_owner.container.c_str());
@@ -387,7 +387,7 @@ void MemoryView::RenderOwnerTooltip(int hovered_address) {
             ImGui::TextUnformatted(line.first.c_str());
         }
     }
-    ImGui::EndTooltip();
+    owner_tooltip.End();
 }
 
 // Fixed-width panes, so one pane's text changing length doesn't move the ones after it.

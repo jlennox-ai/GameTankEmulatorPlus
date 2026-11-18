@@ -297,10 +297,15 @@ void SteppingWindow::RenderSourceLine(const std::string& text, ImVec4 color) {
     }
     uint16_t address;
     uint32_t size;
-    if(Locate(under_mouse->chain, address, size)) {
+    bool located = Locate(under_mouse->chain, address, size);
+    variable_tooltip.Begin();
+    ImGui::TextUnformatted(Describe(under_mouse->chain).c_str());
+    if(located) {
+        ImGui::TextUnformatted(memory_pane_shown ? "Click to show it in the memory pane" : "Click to show it in the memory browser");
+    }
+    variable_tooltip.End();
+    if(located) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        ImGui::SetTooltip(memory_pane_shown ? "%s\nClick to show it in the memory pane" : "%s\nClick to show it in the memory browser",
-            Describe(under_mouse->chain).c_str());
         if(ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             if(memory_pane_shown) {
                 memory_pane.ShowMemory(address, size);
@@ -308,8 +313,6 @@ void SteppingWindow::RenderSourceLine(const std::string& text, ImVec4 color) {
                 show_memory(address, size);
             }
         }
-    } else {
-        ImGui::SetTooltip("%s", Describe(under_mouse->chain).c_str());
     }
 }
 

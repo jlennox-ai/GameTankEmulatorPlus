@@ -525,6 +525,14 @@ std::string IndexText(uint32_t flat, const std::vector<uint32_t>& counts) {
     return text;
 }
 
+// A value in one line, cut off when it runs long.
+std::string Shortened(const std::string& value) {
+    if(value.size() <= MAX_ONE_LINE_LENGTH) {
+        return value;
+    }
+    return value.substr(0, MAX_ONE_LINE_LENGTH) + "...";
+}
+
 // Adds text's lines, all marked or not.
 void AppendLines(std::vector<std::pair<std::string, bool>>& lines, const std::string& text, bool marked) {
     size_t lineStart = 0;
@@ -598,8 +606,8 @@ std::vector<std::pair<std::string, bool>> VariableMap::ElementLines(uint32_t ele
         std::vector<uint8_t> elementBytes = MemberBytes(bytes, 8 * (uint32_t) i * elementSize, 0, elementSize);
         bool focused = (i == focus);
         std::string value = Format(element, elementBytes, read, depth, focused ? Layout::Lines : Layout::OneLine);
-        if(!focused && (value.size() > MAX_ONE_LINE_LENGTH)) {
-            value = value.substr(0, MAX_ONE_LINE_LENGTH) + "...";
+        if(!focused) {
+            value = Shortened(value);
         }
         AppendLines(lines, Indent(depth) + IndexText((uint32_t) i, counts) + " = " + value, focused);
     }
@@ -1090,7 +1098,12 @@ bool VariableMap::FindOwner(uint16_t address, const MemoryReader& read, MemoryOw
             owner.lines.emplace_back(Indent(1) + "}", false);
             continue;
         }
-        AppendLines(owner.lines, member.name + " = " + Format(member.type, memberBytes, read, 1), isMarked);
+        // Only the marked member takes several lines, so the tooltip stays small enough to fit its window.
+        std::string value = Format(member.type, memberBytes, read, 1);
+        if(!isMarked && (value.find('\n') != std::string::npos)) {
+            value = Shortened(Format(member.type, memberBytes, read, 1, Layout::OneLine));
+        }
+        AppendLines(owner.lines, member.name + " = " + value, isMarked);
     }
     return true;
 }
