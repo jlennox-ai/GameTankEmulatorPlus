@@ -127,6 +127,20 @@ private:
         uint32_t size;
         uint32_t offset; // into the variable
     };
+    // One step down into a fixed-address variable: the variable itself, one of its structs'
+    // members, or one of its arrays' elements.
+    struct Level {
+        std::string path;    // "g_well.Blocks[2][3]"
+        uint32_t type;       // 0: bit-fields (or a union's members) sharing a byte, named in path
+        uint32_t start;      // offset into the variable
+        uint32_t size;
+        int64_t index = -1;  // an array's element: which, counting through every dimension
+    };
+
+    // A value on lines of its own (a struct a member a line), or in one line, shorter (numbers
+    // without their hex, pointers named but not followed when they can be).
+    enum class Layout { Lines, OneLine };
+
     // Each fixed-address variable's pieces in memory, by variable index (empty: not one).
     std::unordered_map<size_t, std::vector<MemoryPiece>> memoryPieces;
     // Each byte of memory's variable (index, or -1) and offset into it, for the memory browser.
@@ -145,7 +159,21 @@ private:
     uint32_t SizeOf(uint32_t type) const;
     std::string TypeName(uint32_t type) const;
     std::string ArrayTypeName(uint32_t element, const std::vector<uint32_t>& counts) const;
-    std::string FormatArray(uint32_t element, const std::vector<uint32_t>& counts, const std::vector<uint8_t>& bytes) const;
+    // An array's value: its numbers in a row when there are few ("{ 1, 2, 3 }"), or else a line
+    // an element, the first few; in one line, how many there are.
+    std::string FormatArray(uint32_t element, const std::vector<uint32_t>& counts, const std::vector<uint8_t>& bytes,
+        const MemoryReader& read, int depth, Layout layout) const;
+    // An array's elements a line each ("[2][3] = value"), indented to depth: the first few, or
+    // (focus >= 0) those around the focus element, which is in full and marked. Lines say how
+    // many more there are before and after.
+    std::vector<std::pair<std::string, bool>> ElementLines(uint32_t element, const std::vector<uint32_t>& counts,
+        const std::vector<uint8_t>& bytes, const MemoryReader& read, int64_t focus, int depth) const;
+    // From a fixed-address variable down to the innermost part of it with the byte at offset:
+    // the variable first.
+    std::vector<Level> Descend(size_t variable, uint32_t offset) const;
+    // What a pointer to type at address points at, by the fixed-address variables:
+    // "g_well.Blocks[2][3]". Empty if it's none of theirs, or not the start of something of type.
+    std::string NameAt(uint16_t address, uint32_t type) const;
     // The members of a struct that take up its byte at offset (several when bit-fields share it,
     // or in a union).
     std::vector<const Member*> MembersAt(const Type& structType, uint32_t offset) const;
@@ -158,5 +186,6 @@ private:
     Value Evaluate(const Variable& variable, uint16_t pc, const Registers& registers, const MemoryReader& read) const;
     int64_t RegisterValue(const std::string& name, const Registers& registers, const MemoryReader& read) const;
     std::vector<uint8_t> RegisterBytes(const std::string& name, uint32_t size, const Registers& registers, const MemoryReader& read) const;
-    std::string Format(uint32_t type, const std::vector<uint8_t>& bytes, const MemoryReader& read, int depth) const;
+    std::string Format(uint32_t type, const std::vector<uint8_t>& bytes, const MemoryReader& read, int depth,
+        Layout layout = Layout::Lines) const;
 };

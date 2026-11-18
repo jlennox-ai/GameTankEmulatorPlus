@@ -11,8 +11,14 @@ VariableMap* VariableMap::singleton = nullptr;
 
 // Limits that stop a bad file or a self-referencing pointer from looping or flooding a tooltip.
 #define MAX_TYPEDEF_CHAIN 16
-#define MAX_FORMAT_DEPTH 3
+#define MAX_FORMAT_DEPTH 4
+// Arrays of more, or of anything but numbers, are shown a line an element, at most so many lines.
 #define MAX_ARRAY_ELEMENTS_SHOWN 16
+#define MAX_ARRAY_LINES_SHOWN 8
+// The elements either side of the one the memory browser's hovered byte is in.
+#define ARRAY_FOCUS_RADIUS 3
+// An element shown in one line is cut off past this many characters (a struct's can run long).
+#define MAX_ONE_LINE_LENGTH 90
 
 namespace {
 
@@ -87,6 +93,10 @@ VariableMap::VariableMap(const std::string& path) {
     std::unordered_map<uint32_t, size_t> variableIndexes;
     std::string line;
     while(std::getline(file, line)) {
+        // A file written on Windows has CRLF line ends, which only Windows' text streams drop the CR of.
+        if(!line.empty() && (line.back() == '\r')) {
+            line.pop_back();
+        }
         std::string kind;
         std::unordered_map<std::string, std::string> fields;
         if(line.empty() || !parseLine(line, kind, fields)) {
@@ -490,6 +500,44 @@ std::vector<uint8_t> MemberBytes(const std::vector<uint8_t>& bytes, uint32_t bit
     return BytesOf(field, size ? size : 1);
 }
 
+uint32_t ElementCount(const std::vector<uint32_t>& counts) {
+    uint32_t count = 1;
+    for(auto dimension : counts) {
+        count *= dimension;
+    }
+    return count;
+}
+
+// An element's indexes, "[2][3]", from its place counting through every dimension (the last fastest).
+std::string IndexText(uint32_t flat, const std::vector<uint32_t>& counts) {
+    if(flat >= ElementCount(counts)) {
+        throw std::out_of_range("element " + std::to_string(flat) + " is outside its array");
+    }
+    std::vector<uint32_t> indexes(counts.size());
+    for(size_t dimension = counts.size(); dimension-- > 0;) {
+        indexes[dimension] = flat % counts[dimension];
+        flat /= counts[dimension];
+    }
+    std::string text;
+    for(auto index : indexes) {
+        text += "[" + std::to_string(index) + "]";
+    }
+    return text;
+}
+
+// Adds text's lines, all marked or not.
+void AppendLines(std::vector<std::pair<std::string, bool>>& lines, const std::string& text, bool marked) {
+    size_t lineStart = 0;
+    while(true) {
+        size_t lineEnd = text.find('\n', lineStart);
+        lines.emplace_back(text.substr(lineStart, lineEnd - lineStart), marked);
+        if(lineEnd == std::string::npos) {
+            return;
+        }
+        lineStart = lineEnd + 1;
+    }
+}
+
 } // namespace
 
 std::string VariableMap::ArrayTypeName(uint32_t element, const std::vector<uint32_t>& counts) const {
@@ -500,28 +548,69 @@ std::string VariableMap::ArrayTypeName(uint32_t element, const std::vector<uint3
     return name;
 }
 
-// An array's elements, when they're few numbers; otherwise how many there are.
 std::string VariableMap::FormatArray(uint32_t element, const std::vector<uint32_t>& counts,
-    const std::vector<uint8_t>& bytes) const {
-    uint32_t count = 1;
-    for(auto dimension : counts) {
-        count *= dimension;
-    }
+    const std::vector<uint8_t>& bytes, const MemoryReader& read, int depth, Layout layout) const {
+    uint32_t count = ElementCount(counts);
     uint32_t elementSize = SizeOf(element);
     const Type* resolved = Resolve(element);
     bool scalar = (resolved != nullptr) && ((resolved->kind == "base") || (resolved->kind == "enum"));
-    if(!scalar || (elementSize == 0) || (count > MAX_ARRAY_ELEMENTS_SHOWN)) {
+    if((elementSize == 0) || (count == 0)) {
         return std::to_string(count) + " elements";
     }
-    std::string shown = "{ ";
-    for(uint32_t i = 0; i < count; ++i) {
-        std::vector<uint8_t> elementBytes = MemberBytes(bytes, 8 * i * elementSize, 0, elementSize);
-        shown += (i ? ", " : "") + std::to_string(LittleEndian(elementBytes));
+    if(scalar && (count <= MAX_ARRAY_ELEMENTS_SHOWN)) {
+        std::string shown = "{ ";
+        for(uint32_t i = 0; i < count; ++i) {
+            std::vector<uint8_t> elementBytes = MemberBytes(bytes, 8 * i * elementSize, 0, elementSize);
+            shown += (i ? ", " : "") + Format(element, elementBytes, read, depth + 1, Layout::OneLine);
+        }
+        return shown + " }";
     }
-    return shown + " }";
+    if((layout == Layout::OneLine) || (depth >= MAX_FORMAT_DEPTH)) {
+        return std::to_string(count) + " elements";
+    }
+    std::string shown = "{";
+    for(auto& line : ElementLines(element, counts, bytes, read, -1, depth + 1)) {
+        shown += "\n" + line.first;
+    }
+    return shown + "\n" + Indent(depth) + "}";
 }
 
-std::string VariableMap::Format(uint32_t type, const std::vector<uint8_t>& bytes, const MemoryReader& read, int depth) const {
+std::vector<std::pair<std::string, bool>> VariableMap::ElementLines(uint32_t element, const std::vector<uint32_t>& counts,
+    const std::vector<uint8_t>& bytes, const MemoryReader& read, int64_t focus, int depth) const {
+    int64_t count = ElementCount(counts);
+    if(focus >= count) {
+        throw std::out_of_range("element " + std::to_string(focus) + " is outside its array");
+    }
+    uint32_t elementSize = SizeOf(element);
+    int64_t first = 0;
+    int64_t end = std::min(count, (int64_t) MAX_ARRAY_LINES_SHOWN);
+    if(focus >= 0) {
+        // The same number of lines wherever the focus is, so a tooltip keeps its height.
+        int64_t shown = 2 * ARRAY_FOCUS_RADIUS + 1;
+        first = std::clamp(focus - ARRAY_FOCUS_RADIUS, (int64_t) 0, std::max(count - shown, (int64_t) 0));
+        end = std::min(count, first + shown);
+    }
+    std::vector<std::pair<std::string, bool>> lines;
+    if(first > 0) {
+        lines.emplace_back(Indent(depth) + "..." + std::to_string(first) + " more", false);
+    }
+    for(int64_t i = first; i < end; ++i) {
+        std::vector<uint8_t> elementBytes = MemberBytes(bytes, 8 * (uint32_t) i * elementSize, 0, elementSize);
+        bool focused = (i == focus);
+        std::string value = Format(element, elementBytes, read, depth, focused ? Layout::Lines : Layout::OneLine);
+        if(!focused && (value.size() > MAX_ONE_LINE_LENGTH)) {
+            value = value.substr(0, MAX_ONE_LINE_LENGTH) + "...";
+        }
+        AppendLines(lines, Indent(depth) + IndexText((uint32_t) i, counts) + " = " + value, focused);
+    }
+    if(end < count) {
+        lines.emplace_back(Indent(depth) + "..." + std::to_string(count - end) + " more", false);
+    }
+    return lines;
+}
+
+std::string VariableMap::Format(uint32_t type, const std::vector<uint8_t>& bytes, const MemoryReader& read, int depth,
+    Layout layout) const {
     const Type* resolved = Resolve(type);
     if(resolved == nullptr) {
         return "?";
@@ -536,8 +625,14 @@ std::string VariableMap::Format(uint32_t type, const std::vector<uint8_t>& bytes
         int digits = 2 * (int) (size ? size : 1);
         if(resolved->encoding == "signed") {
             int64_t value = (size >= 8) ? (int64_t) raw : (int64_t) (raw << (64 - 8 * size)) >> (64 - 8 * size);
+            if(layout == Layout::OneLine) {
+                return std::to_string(value);
+            }
             std::snprintf(text, sizeof(text), "%lld ($%0*llX)", (long long) value, digits, (unsigned long long) raw);
         } else {
+            if(layout == Layout::OneLine) {
+                return std::to_string(raw);
+            }
             std::snprintf(text, sizeof(text), "%llu ($%0*llX)", (unsigned long long) raw, digits, (unsigned long long) raw);
         }
         return text;
@@ -545,21 +640,27 @@ std::string VariableMap::Format(uint32_t type, const std::vector<uint8_t>& bytes
     if(resolved->kind == "enum") {
         for(auto& enumerator : resolved->enumerators) {
             if((uint64_t) enumerator.first == raw) {
-                return enumerator.second + " (" + std::to_string(raw) + ")";
+                return (layout == Layout::OneLine) ? enumerator.second : (enumerator.second + " (" + std::to_string(raw) + ")");
             }
         }
         return std::to_string(raw);
     }
     if(resolved->kind == "pointer") {
         std::string shown = Hex16((uint32_t) raw);
+        std::string name = (raw != 0) ? NameAt((uint16_t) raw, resolved->target) : "";
+        if(!name.empty()) {
+            shown += " (" + name + ")";
+        }
         const Type* target = Resolve(resolved->target);
         bool readable = (target != nullptr) && (target->kind != "function") && (target->kind != "array");
-        if(readable && (raw != 0) && (depth < MAX_FORMAT_DEPTH)) {
+        // In one line, a name says enough.
+        bool follow = (layout == Layout::Lines) || name.empty();
+        if(readable && follow && (raw != 0) && (depth < MAX_FORMAT_DEPTH)) {
             std::vector<uint8_t> pointed;
             for(uint32_t i = 0; i < SizeOf(resolved->target); ++i) {
                 pointed.push_back(read((uint16_t) (raw + i)));
             }
-            shown += " -> " + Format(resolved->target, pointed, read, depth + 1);
+            shown += " -> " + Format(resolved->target, pointed, read, depth + 1, layout);
         }
         return shown;
     }
@@ -567,15 +668,23 @@ std::string VariableMap::Format(uint32_t type, const std::vector<uint8_t>& bytes
         if(depth >= MAX_FORMAT_DEPTH) {
             return "{...}";
         }
-        std::string shown = "{";
+        bool oneLine = (layout == Layout::OneLine);
+        std::string shown = oneLine ? "{ " : "{";
+        bool firstMember = true;
         for(auto& member : resolved->members) {
             std::vector<uint8_t> memberBytes = MemberBytes(bytes, member.bitOffset, member.bitSize, SizeOf(member.type));
-            shown += "\n" + Indent(depth + 1) + member.name + " = " + Format(member.type, memberBytes, read, depth + 1);
+            std::string value = member.name + " = " + Format(member.type, memberBytes, read, depth + 1, layout);
+            if(oneLine) {
+                shown += (firstMember ? "" : ", ") + value;
+            } else {
+                shown += "\n" + Indent(depth + 1) + value;
+            }
+            firstMember = false;
         }
-        return shown + "\n" + Indent(depth) + "}";
+        return oneLine ? (shown + " }") : (shown + "\n" + Indent(depth) + "}");
     }
     if(resolved->kind == "array") {
-        return FormatArray(resolved->target, resolved->counts, bytes);
+        return FormatArray(resolved->target, resolved->counts, bytes, read, depth, layout);
     }
     return Hex16((uint32_t) raw);
 }
@@ -754,7 +863,8 @@ std::string VariableMap::Describe(const Chain& chain, uint16_t pc, const Registe
         return result.expression + result.error;
     }
     if(!result.arrayCounts.empty()) {
-        return result.expression + " = " + FormatArray(result.type, result.arrayCounts, result.value.bytes) + "\n"
+        return result.expression + " = "
+            + FormatArray(result.type, result.arrayCounts, result.value.bytes, read, 0, Layout::Lines) + "\n"
             + ArrayTypeName(result.type, result.arrayCounts) + ", " + result.where;
     }
     return result.expression + " = " + Format(result.type, result.value.bytes, read, 0) + "\n" + TypeName(result.type)
@@ -844,35 +954,18 @@ std::vector<const VariableMap::Member*> VariableMap::MembersAt(const Type& struc
     return members;
 }
 
-bool VariableMap::FindOwner(uint16_t address, const MemoryReader& read, MemoryOwner& owner) const {
-    if(byteOwners.empty() || (byteOwners[address].first < 0)) {
-        return false;
-    }
-    size_t variableIndex = (size_t) byteOwners[address].first;
-    uint32_t target = byteOwners[address].second;
-
-    // Down from the variable to the innermost part with the byte in it, remembering the last
-    // struct passed through on the way. Offsets are into the variable.
-    std::string path = variables[variableIndex].name;
-    uint32_t type = variables[variableIndex].type;
-    uint32_t start = 0;
-    uint32_t size = SizeOf(type);
-    const Type* container = nullptr;
-    uint32_t containerTypeId = 0;
-    std::string containerPath;
-    uint32_t containerStart = 0;
+std::vector<VariableMap::Level> VariableMap::Descend(size_t variable, uint32_t offset) const {
+    std::vector<Level> levels;
+    levels.push_back({ variables.at(variable).name, variables[variable].type, 0, SizeOf(variables[variable].type) });
     while(true) {
-        const Type* resolved = Resolve(type);
+        Level level = levels.back();
+        const Type* resolved = Resolve(level.type);
         if(resolved == nullptr) {
             break;
         }
-        uint32_t offset = target - start;
+        uint32_t within = offset - level.start;
         if((resolved->kind == "struct") || (resolved->kind == "union")) {
-            container = resolved;
-            containerTypeId = type;
-            containerPath = path;
-            containerStart = start;
-            std::vector<const Member*> members = MembersAt(*resolved, offset);
+            std::vector<const Member*> members = MembersAt(*resolved, within);
             if(members.empty()) {
                 // Padding between members: the byte is only the struct's.
                 break;
@@ -883,68 +976,95 @@ bool VariableMap::FindOwner(uint16_t address, const MemoryReader& read, MemoryOw
                 for(auto member : members) {
                     names += (names.empty() ? "" : ", ") + member->name;
                 }
-                path = (members.size() > 1) ? (path + " (" + names + ")") : (path + "." + names);
-                start = target;
-                size = 1;
+                std::string path = (members.size() > 1) ? (level.path + " (" + names + ")") : (level.path + "." + names);
+                levels.push_back({ path, 0, offset, 1 });
                 break;
             }
-            path += "." + members[0]->name;
-            start += members[0]->bitOffset / 8;
-            type = members[0]->type;
-            size = SizeOf(type);
+            uint32_t memberType = members[0]->type;
+            levels.push_back({ level.path + "." + members[0]->name, memberType, level.start + members[0]->bitOffset / 8,
+                SizeOf(memberType) });
             continue;
         }
         if((resolved->kind == "array") && !resolved->counts.empty()) {
             uint32_t elementSize = SizeOf(resolved->target);
-            if(elementSize == 0) {
+            if((elementSize == 0) || (ElementCount(resolved->counts) == 0)) {
                 break;
             }
-            // The element's indexes, last dimension fastest.
-            uint32_t flat = offset / elementSize;
-            std::vector<uint32_t> indexes(resolved->counts.size());
-            uint32_t remaining = flat;
-            for(size_t dimension = resolved->counts.size(); dimension-- > 0;) {
-                indexes[dimension] = remaining % resolved->counts[dimension];
-                remaining /= resolved->counts[dimension];
-            }
-            for(auto index : indexes) {
-                path += "[" + std::to_string(index) + "]";
-            }
-            start += flat * elementSize;
-            type = resolved->target;
-            size = elementSize;
+            uint32_t flat = within / elementSize;
+            levels.push_back({ level.path + IndexText(flat, resolved->counts), resolved->target,
+                level.start + flat * elementSize, elementSize, flat });
             continue;
         }
         // A number, enum or pointer: as far down as it goes.
         break;
     }
+    return levels;
+}
 
+std::string VariableMap::NameAt(uint16_t address, uint32_t type) const {
+    if(byteOwners.empty() || (byteOwners[address].first < 0)) {
+        return "";
+    }
+    const Type* wanted = Resolve(type);
+    if(wanted == nullptr) {
+        return "";
+    }
+    uint32_t offset = byteOwners[address].second;
+    std::vector<Level> levels = Descend((size_t) byteOwners[address].first, offset);
+    // The innermost of those starting there that's of the type (a struct's first member starts
+    // where the struct does).
+    for(size_t i = levels.size(); i-- > 0;) {
+        if((levels[i].start == offset) && (levels[i].type != 0) && (Resolve(levels[i].type) == wanted)) {
+            return levels[i].path;
+        }
+    }
+    return "";
+}
+
+bool VariableMap::FindOwner(uint16_t address, const MemoryReader& read, MemoryOwner& owner) const {
+    if(byteOwners.empty() || (byteOwners[address].first < 0)) {
+        return false;
+    }
+    size_t variableIndex = (size_t) byteOwners[address].first;
+    uint32_t target = byteOwners[address].second;
+    std::vector<Level> levels = Descend(variableIndex, target);
+
+    // The innermost struct around the byte, or else the whole variable.
+    size_t containerLevel = 0;
+    for(size_t i = 0; i < levels.size(); ++i) {
+        const Type* resolved = Resolve(levels[i].type);
+        if((resolved != nullptr) && ((resolved->kind == "struct") || (resolved->kind == "union"))) {
+            containerLevel = i;
+        }
+    }
+    const Level& part = levels.back();
+    const Level& container = levels[containerLevel];
     owner.variable = variableIndex;
-    owner.part = path;
-    owner.partOffset = start;
-    owner.partSize = size;
+    owner.part = part.path;
+    owner.partOffset = part.start;
+    owner.partSize = part.size;
+    owner.container = container.path;
+    owner.containerType = TypeName(container.type);
+    owner.containerOffset = container.start;
+    owner.containerSize = container.size;
+    owner.containerWhere = PiecesWhere(variableIndex, container.start, container.size);
     owner.lines.clear();
     std::vector<bool> inMemory;
-    if(container == nullptr) {
-        // In no struct: the part is shown by itself.
-        owner.container = path;
-        owner.containerType = TypeName(type);
-        owner.containerOffset = start;
-        owner.containerSize = size;
-        owner.containerWhere = PiecesWhere(variableIndex, start, size);
-        std::vector<uint8_t> bytes = ReadPieces(variableIndex, start, size, read, inMemory);
-        owner.lines.emplace_back(path + " = " + Format(type, bytes, read, 0), true);
+    std::vector<uint8_t> bytes = ReadPieces(variableIndex, container.start, container.size, read, inMemory);
+    const Type* containerType = Resolve(container.type);
+    bool isStruct = (containerType != nullptr) && ((containerType->kind == "struct") || (containerType->kind == "union"));
+    if(!isStruct) {
+        if(levels.size() > 1) {
+            // An array: the elements around the one the byte is in.
+            owner.lines = ElementLines(containerType->target, containerType->counts, bytes, read, levels[1].index, 0);
+        } else {
+            owner.lines.emplace_back(container.path + " = " + Format(container.type, bytes, read, 0), true);
+        }
         return true;
     }
 
-    owner.container = containerPath;
-    owner.containerType = TypeName(containerTypeId);
-    owner.containerOffset = containerStart;
-    owner.containerSize = SizeOf(containerTypeId);
-    owner.containerWhere = PiecesWhere(variableIndex, containerStart, owner.containerSize);
-    std::vector<uint8_t> bytes = ReadPieces(variableIndex, containerStart, owner.containerSize, read, inMemory);
-    std::vector<const Member*> marked = MembersAt(*container, target - containerStart);
-    for(auto& member : container->members) {
+    std::vector<const Member*> marked = MembersAt(*containerType, target - container.start);
+    for(auto& member : containerType->members) {
         bool isMarked = std::find(marked.begin(), marked.end(), &member) != marked.end();
         uint32_t first = member.bitOffset / 8;
         uint32_t last = (member.bitSize != 0) ? ((member.bitOffset + member.bitSize - 1) / 8)
@@ -953,23 +1073,24 @@ bool VariableMap::FindOwner(uint16_t address, const MemoryReader& read, MemoryOw
         for(uint32_t byte = first; (byte <= last) && (byte < inMemory.size()); ++byte) {
             memberInMemory = memberInMemory && inMemory[byte];
         }
-        std::string text = member.name + " = ";
-        if(memberInMemory) {
-            std::vector<uint8_t> memberBytes = MemberBytes(bytes, member.bitOffset, member.bitSize, SizeOf(member.type));
-            text += Format(member.type, memberBytes, read, 1);
-        } else {
-            text += "(not in memory)";
+        if(!memberInMemory) {
+            owner.lines.emplace_back(member.name + " = (not in memory)", isMarked);
+            continue;
         }
-        // A nested struct's value takes several lines: all of them are the member's.
-        size_t lineStart = 0;
-        while(true) {
-            size_t lineEnd = text.find('\n', lineStart);
-            owner.lines.emplace_back(text.substr(lineStart, lineEnd - lineStart), isMarked);
-            if(lineEnd == std::string::npos) {
-                break;
-            }
-            lineStart = lineEnd + 1;
+        std::vector<uint8_t> memberBytes = MemberBytes(bytes, member.bitOffset, member.bitSize, SizeOf(member.type));
+        const Type* memberType = Resolve(member.type);
+        // An array the byte is in an element of (not of structs: the element would be the container).
+        bool holdsPart = isMarked && (memberType != nullptr) && (memberType->kind == "array")
+            && (levels.size() > containerLevel + 2);
+        if(holdsPart) {
+            owner.lines.emplace_back(member.name + " = {", false);
+            std::vector<std::pair<std::string, bool>> elements = ElementLines(memberType->target, memberType->counts,
+                memberBytes, read, levels[containerLevel + 2].index, 2);
+            owner.lines.insert(owner.lines.end(), elements.begin(), elements.end());
+            owner.lines.emplace_back(Indent(1) + "}", false);
+            continue;
         }
+        AppendLines(owner.lines, member.name + " = " + Format(member.type, memberBytes, read, 1), isMarked);
     }
     return true;
 }
