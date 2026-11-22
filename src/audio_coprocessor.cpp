@@ -6,13 +6,25 @@
 #include "audio_coprocessor.h"
 #include "save_state.h"
 #include "emulator_config.h"
+#include "uninitialized_memory.h"
+#include <algorithm>
+#include <iterator>
 
 void AudioCoprocessor::ram_write(uint16_t address, uint8_t value) {
 	state.ram[address & 0xFFF] = value;
+	state.ram_initialized[address & 0xFFF] = true;
 }
 
 uint8_t AudioCoprocessor::ram_read(uint16_t address) {
 	return state.ram[address & 0xFFF];
+}
+
+bool AudioCoprocessor::is_first_read(uint16_t address) {
+	return UninitializedMemory::IsFirstRead(state.ram_initialized[address & 0xFFF]);
+}
+
+void AudioCoprocessor::forget_writes() {
+	std::fill(std::begin(state.ram_initialized), std::end(state.ram_initialized), false);
 }
 
 void AudioCoprocessor::register_write(uint16_t address, uint8_t value) {
@@ -84,7 +96,12 @@ void AudioCoprocessor::fill_audio(void *udata, uint8_t *stream, int len) {
 ACPState* AudioCoprocessor::singleton_acp_state;
 
 uint8_t ACP_MemoryRead(uint16_t address) {
-    return AudioCoprocessor::singleton_acp_state->ram[address & 0xFFF];
+    ACPState* acp = AudioCoprocessor::singleton_acp_state;
+    if(UninitializedMemory::IsFirstRead(acp->ram_initialized[address & 0xFFF])) {
+        UninitializedMemory::Report({ UninitializedMemory::Kind::AudioRAM, UninitializedMemory::Reader::AudioCPU,
+            (uint32_t) (address & 0xFFF), acp->cpu->pc });
+    }
+    return acp->ram[address & 0xFFF];
 }
 
 uint8_t ACP_CPUSync(uint16_t address) {
@@ -98,6 +115,7 @@ uint8_t ACP_CPUSync(uint16_t address) {
 
 void ACP_MemoryWrite(uint16_t address, uint8_t value) {
     AudioCoprocessor::singleton_acp_state->ram[address & 0xFFF] = value;
+    AudioCoprocessor::singleton_acp_state->ram_initialized[address & 0xFFF] = true;
     if(address & 0x8000) {
         AudioCoprocessor::singleton_acp_state->dacReg = value;
     }
@@ -174,6 +192,7 @@ AudioCoprocessor::AudioCoprocessor() {
 
 	for(int i = 0; i < AUDIO_RAM_SIZE; i ++) {
 		state.ram[i] = rand() % 256;
+		state.ram_initialized[i] = false;
 	}
 
     if(!EmulatorConfig::noSound) {
@@ -205,6 +224,7 @@ struct AudioDeviceLock {
 void AudioCoprocessor::SerializeState(StateFile& file) {
     AudioDeviceLock lock(state.device);
     file.Value(state.ram);
+    file.Value(state.ram_initialized);
     state.cpu->SerializeState(file);
     file.Value(state.irqCounter);
     file.Value(state.irqRate);

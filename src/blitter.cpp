@@ -1,5 +1,6 @@
 #include "blitter.h"
 #include "save_state.h"
+#include "uninitialized_memory.h"
 
 Uint32 get_pixel32( SDL_Surface *surface, int x, int y )
 {
@@ -25,6 +26,7 @@ void Blitter::SetParam(uint8_t address, uint8_t value) {
         irq = false;
         cpu_core->ClearIRQ();
         if(trigger) {
+            CheckSourceInitialized();
             uint32_t cycles = ((params[Blitter::PARAM_HEIGHT] & 0x7F) * (params[Blitter::PARAM_WIDTH] & 0x7F));
             cpu_core->ScheduleIRQ(cycles, &(system_state->dma_control_irq));
             if(instant_mode) {
@@ -42,6 +44,55 @@ void Blitter::SetParam(uint8_t address, uint8_t value) {
 #define XDIR (!!(params[PARAM_WIDTH] & 0x80))
 #define YDIR (!!(params[PARAM_HEIGHT] & 0x80))
 #define GCARRY(val) ((system_state->dma_control & DMA_GCARRY_BIT) ? val+1 : ((val & 0xF0) | ((val+1) & 0x0F)))
+
+uint32_t Blitter::GramIndex(uint8_t gx, uint8_t gy) {
+    uint32_t gOffset = ((system_state->banking & BANK_GRAM_MASK) << 16) +
+            (!!(gy & 0x80) << 15) +
+            (!!(gx & 0x80) << 14);
+    return ((gy & 0x7F) << 7) | (gx & 0x7F) | gOffset;
+}
+
+bool Blitter::Clipped(uint8_t vx, uint8_t vy) {
+    return ((vx & 0x80) && (system_state->banking & BANK_WRAPX_MASK))
+        || ((vy & 0x80) && (system_state->banking & BANK_WRAPY_MASK));
+}
+
+// Walks the blit's pixels as CatchUp will, by the parameters as they are now.
+void Blitter::CheckSourceInitialized() {
+    if(!UninitializedMemory::enabled) {
+        return;
+    }
+    // A fill reads no graphics RAM, and with copying off nothing is drawn.
+    if((system_state->dma_control & DMA_COLORFILL_ENABLE_BIT) || !(system_state->dma_control & DMA_COPY_ENABLE_BIT)) {
+        return;
+    }
+    uint8_t width = params[PARAM_WIDTH] & 0x7F;
+    uint8_t height = params[PARAM_HEIGHT] & 0x7F;
+    bool reported = false;
+    uint8_t gy = params[PARAM_GY];
+    uint8_t vy = params[PARAM_VY];
+    for(uint8_t row = 0; row < height; ++row) {
+        uint8_t gx = params[PARAM_GX];
+        uint8_t vx = params[PARAM_VX];
+        for(uint8_t column = 0; column < width; ++column) {
+            // A pixel that's clipped away isn't drawn from what's read, so that's no read.
+            if(!Clipped(vx, vy)) {
+                uint32_t index = GramIndex(XDIR ? (uint8_t) ~gx : gx, YDIR ? (uint8_t) ~gy : gy);
+                // Every pixel's flag is set, so the blit is reported once: for its first.
+                if(UninitializedMemory::IsFirstRead(system_state->gram_initialized[index]) && !reported) {
+                    UninitializedMemory::Report({ UninitializedMemory::Kind::GraphicsRAM,
+                        UninitializedMemory::Reader::Blitter, index, 0 });
+                    cpu_core->Freeze();
+                    reported = true;
+                }
+            }
+            ++vx;
+            gx = GCARRY(gx);
+        }
+        ++vy;
+        gy = GCARRY(gy);
+    }
+}
 
 void Blitter::CatchUp(uint64_t cycles) {
     if(cycles == 0) {
@@ -111,18 +162,14 @@ void Blitter::CatchUp(uint64_t cycles) {
                 if(system_state->dma_control & DMA_COLORFILL_ENABLE_BIT) {
                     colorbus = ~(params[PARAM_COLOR]);
                 } else {
-                    uint32_t gOffset = ((system_state->banking & BANK_GRAM_MASK) << 16) + 
-                            (!!(counterGY & 0x80) << 15) +
-                            (!!(counterGX & 0x80) << 14);
-                    colorbus = system_state->gram[((counterGY & 0x7F) << 7) | (counterGX & 0x7F) | gOffset];
+                    colorbus = system_state->gram[GramIndex(counterGX, counterGY)];
                 }
                 counterGX = XDIR ? ~counterGX : counterGX;
                 counterGY = YDIR ? ~counterGY : counterGY;
 
                 if(system_state->dma_control & DMA_COPY_ENABLE_BIT) {
                     if(((system_state->dma_control & DMA_TRANSPARENCY_BIT) || (colorbus != 0))
-                        && !((counterVX & 0x80) && (system_state->banking & BANK_WRAPX_MASK))
-                        && !((counterVY & 0x80) && system_state->banking & BANK_WRAPY_MASK)) {
+                        && !Clipped(counterVX, counterVY)) {
                         int yShift = (system_state->banking & BANK_VRAM_MASK) ? 128 : 0;
                         int vOffset = yShift << 7;
                         system_state->vram[((counterVY & 0x7F) << 7) | (counterVX & 0x7F) | vOffset] = colorbus;

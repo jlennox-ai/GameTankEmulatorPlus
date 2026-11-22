@@ -11,6 +11,8 @@ using namespace std;
 
 typedef struct ACPState {
 	uint8_t ram[AUDIO_RAM_SIZE];
+	// Whether each byte of it has been written (uninitialized_memory.h).
+	bool ram_initialized[AUDIO_RAM_SIZE];
 	mos6502 *cpu;
     int16_t irqCounter;
     uint8_t irqRate;
@@ -43,6 +45,11 @@ public:
 	void StartAudio();
 	void ram_write(uint16_t address, uint8_t value);
 	uint8_t ram_read(uint16_t address);
+	// Whether the CPU reading address is a read of audio RAM nothing has written, to report
+	// (UninitializedMemory::IsFirstRead).
+	bool is_first_read(uint16_t address);
+	// Power-on: no byte of audio RAM counts as written.
+	void forget_writes();
 	void register_write(uint16_t address, uint8_t value);
 	void dump_ram(const char* filename);
 	uint16_t get_irq_cycle_count();

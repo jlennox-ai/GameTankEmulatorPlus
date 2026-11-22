@@ -1,4 +1,5 @@
 #include "../imgui/imgui.h"
+#include "../uninitialized_memory.h"
 #include "stepping_window.h"
 #include "breakpoints.h"
 #include "disassembler.h"
@@ -425,6 +426,13 @@ ImVec2 SteppingWindow::Render() {
     }
     if(ImGui::IsItemHovered()) {
         ImGui::SetTooltip(memory_pane_shown ? "Hide the memory pane" : "Show memory beside the code");
+    }
+
+    // Why the CPU stopped, when it was "Break on uninitialized memory reads".
+    if(!UninitializedMemory::message.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+        ImGui::TextWrapped("%s", UninitializedMemory::message.c_str());
+        ImGui::PopStyleColor();
     }
 
     // With the memory pane, the rest of the debugger is the left pane.

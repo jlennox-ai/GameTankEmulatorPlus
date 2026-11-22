@@ -44,6 +44,14 @@ private:
 
     uint64_t last_updated_cycle = 0;
 
+    // Where in graphics RAM a pixel is read from, for source counters with any flip applied.
+    uint32_t GramIndex(uint8_t gx, uint8_t gy);
+    // Whether a pixel bound for vx, vy is clipped away rather than drawn.
+    bool Clipped(uint8_t vx, uint8_t vy);
+    // "Break on uninitialized memory reads": reports the blit that's starting if it will draw from
+    // graphics RAM nothing has written, and stops the CPU at the write that started it.
+    void CheckSourceInitialized();
+
 public:
     static const uint8_t PARAM_VX      = 0;
     static const uint8_t PARAM_VY      = 1;

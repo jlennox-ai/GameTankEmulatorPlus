@@ -32,6 +32,9 @@ struct SystemState {
 
     uint8_t vram[VRAM_BUFFER_SIZE];
     uint8_t gram[GRAM_BUFFER_SIZE];
+    // Whether each byte of graphics RAM has been written (uninitialized_memory.h), as
+    // ram_initialized is for RAM.
+    bool gram_initialized[GRAM_BUFFER_SIZE];
     
     uint8_t VIA_regs[16];
 };

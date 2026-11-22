@@ -25,6 +25,7 @@
 
 #include "timekeeper.h"
 #include "system_state.h"
+#include "uninitialized_memory.h"
 #include "emulator_config.h"
 #include "game_config.h"
 
@@ -134,6 +135,7 @@ int topBarsHeight = 0;
 bool showScreenSides = true;
 const char* MAIN_WINDOW_SETTINGS = "main_window";
 const char* SCREEN_SIDES_KEY = "screen_sides";
+const char* BREAK_ON_UNINITIALIZED_KEY = "break_on_uninitialized_memory";
 // Where refreshScreen last drew the game's viewport, for screenshots.
 SDL_Rect lastViewport = { 0, 0, 0, 0 };
 #define GRID_NONE 0
@@ -327,7 +329,20 @@ uint8_t open_bus() {
 	return rand() % 256;
 }
 
-uint8_t VDMA_Read(uint16_t address) {
+// The instruction the CPU is running: where its opcode was fetched from.
+uint16_t currentInstructionAddress = 0;
+
+RamWipeDetector ramWipeDetector(RAMSIZE);
+
+// "Break on uninitialized memory reads": the CPU has read memory nothing has written. It stops
+// once this instruction is done (stopOnUninitializedMemory).
+void reportUninitializedRead(UninitializedMemory::Kind kind, uint32_t location) {
+	UninitializedMemory::Report({ kind, UninitializedMemory::Reader::CPU, location, currentInstructionAddress });
+	cpu_core->Freeze();
+}
+
+// stateful: the CPU's own read, not the debugger looking.
+uint8_t VDMA_Read(uint16_t address, bool stateful) {
 	blitter->CatchUp();
 	if(system_state.dma_control & DMA_COPY_ENABLE_BIT) {
 		return open_bus();
@@ -342,6 +357,9 @@ uint8_t VDMA_Read(uint16_t address) {
 		} else {
 			bufPtr = system_state.gram;
 			offset = (((system_state.banking & BANK_GRAM_MASK) << 2) | (blitter->gram_mid_bits)) << 14;
+			if(stateful && UninitializedMemory::IsFirstRead(system_state.gram_initialized[(address & 0x3FFF) | offset])) {
+				reportUninitializedRead(UninitializedMemory::Kind::GraphicsRAM, (address & 0x3FFF) | offset);
+			}
 		}
 		return bufPtr[(address & 0x3FFF) | offset];
 	}
@@ -368,6 +386,7 @@ void VDMA_Write(uint16_t address, uint8_t value) {
 			targetSurface = gRAM_Surface;
 			yShift = (((system_state.banking & BANK_GRAM_MASK) << 2) | (blitter->gram_mid_bits)) * GT_HEIGHT;
 			offset = (((system_state.banking & BANK_GRAM_MASK) << 2) | (blitter->gram_mid_bits)) << 14;
+			system_state.gram_initialized[(address & 0x3FFF) | offset] = true;
 		}
 		bufPtr[(address & 0x3FFF) | offset] = value;
 
@@ -439,15 +458,18 @@ uint8_t MemoryReadResolve(const uint16_t address, bool stateful) {
 			return MemoryRead_Unknown(address);
 		}
 	} else if(address & 0x4000) {
-		return VDMA_Read(address);
+		return VDMA_Read(address, stateful);
 	} else if((address >= 0x3000) && (address <= 0x3FFF)) {
+		if(stateful && soundcard->is_first_read(address)) {
+			reportUninitializedRead(UninitializedMemory::Kind::AudioRAM, address & 0xFFF);
+		}
 		return soundcard->ram_read(address);
 	} else if((address >= 0x2800) && (address <= 0x2FFF)) {
 		return system_state.VIA_regs[address & 0xF];
 	} else if(address < 0x2000) {
 		if(stateful) {
-			if(!system_state.ram_initialized[FULL_RAM_ADDRESS(address & 0x1FFF)]) {
-				//printf("WARNING! Uninitialized RAM read at %x (Bank %x)\n", address, system_state.banking >> 5);
+			if(UninitializedMemory::IsFirstRead(system_state.ram_initialized[FULL_RAM_ADDRESS(address & 0x1FFF)])) {
+				reportUninitializedRead(UninitializedMemory::Kind::RAM, address);
 			}
 		}
 		return *GetRAM(address);
@@ -465,6 +487,7 @@ uint8_t MemoryRead(uint16_t address) {
 }
 
 uint8_t MemorySync(uint16_t address) {
+	currentInstructionAddress = address;
 	bool stepping = (timekeeper.clock_mode == CLOCKMODE_STEPSOURCE) || (timekeeper.clock_mode == CLOCKMODE_STEPOUT);
 	if((timekeeper.clock_mode == CLOCKMODE_NORMAL) || stepping) {
 		uint8_t opcode = MemoryReadResolve(address, false);
@@ -633,6 +656,10 @@ void MemoryWrite(uint16_t address, uint8_t value) {
 			printf("First RAM write at %x (Bank %x) (Value %x)\n", address, system_state.banking >> 6, value);
 		}*/
 		system_state.ram_initialized[FULL_RAM_ADDRESS(address & 0x1FFF)] = true;
+		if(UninitializedMemory::enabled) {
+			ramWipeDetector.Write(timekeeper.totalCyclesCount, currentInstructionAddress,
+				FULL_RAM_ADDRESS(address & 0x1FFF), value, system_state.ram_initialized);
+		}
 		system_state.ram[FULL_RAM_ADDRESS(address & 0x1FFF)] = value;
 	}
 }
@@ -643,6 +670,16 @@ bool gofast = false;
 bool paused = true;
 bool lshift = false;
 bool rshift = false;
+
+// Power-on, as far as "Break on uninitialized memory reads" goes: nothing counts as written.
+void forgetMemoryWrites() {
+	std::fill(std::begin(system_state.ram_initialized), std::end(system_state.ram_initialized), false);
+	std::fill(std::begin(system_state.gram_initialized), std::end(system_state.gram_initialized), false);
+	// A ROM named on the command line is loaded before there's a sound card.
+	if(soundcard != NULL) {
+		soundcard->forget_writes();
+	}
+}
 
 void randomize_vram() {
 	for(int i = 0; i < VRAM_BUFFER_SIZE; i ++) {
@@ -658,7 +695,6 @@ void randomize_vram() {
 void randomize_memory() {
 	for(int i = 0; i < RAMSIZE; i++) {
 		system_state.ram[i] = rand() % 256;
-		system_state.ram_initialized[i] = false;
 	}
 
 	for(int i = 0; i < VRAM_BUFFER_SIZE; i++) {
@@ -669,6 +705,8 @@ void randomize_memory() {
 		system_state.gram[i] = rand() % 256;	
 	}
 	
+	forgetMemoryWrites();
+
 	system_state.dma_control = rand() % 256;
 	system_state.dma_control_irq = (system_state.dma_control & DMA_COPY_IRQ_BIT) != 0;
 	system_state.banking = rand() % 256;
@@ -690,7 +728,7 @@ void redraw_memory_surfaces() {
 // and the frame timing) but not the ROM itself, so a state loads onto a rebuilt ROM: handy for
 // trying a change from the same spot, though code that moved won't line up with the saved CPU.
 const char SAVE_STATE_MAGIC[8] = { 'G', 'T', 'S', 'T', 'A', 'T', 'E', '\0' };
-const uint32_t SAVE_STATE_VERSION = 1;
+const uint32_t SAVE_STATE_VERSION = 2;
 
 std::string saveStatePath() {
 	std::filesystem::path path(currentRomFilePath);
@@ -706,6 +744,7 @@ void serializeMachineState(StateFile& file) {
 	file.Value(system_state.ram_initialized);
 	file.Value(system_state.vram);
 	file.Value(system_state.gram);
+	file.Value(system_state.gram_initialized);
 	file.Value(system_state.VIA_regs);
 	file.Value(cartridge_state.bank_shifter);
 	file.Value(cartridge_state.bank_mask);
@@ -959,10 +998,12 @@ extern "C" {
 			break;
 		}
 		fread(cartridge_state.rom, sizeof(uint8_t), cartridge_state.size, romFileP);
+		forgetMemoryWrites();
 		fclose(romFileP);
 		if(cpu_core) {
 			ResumeEmulation();
 			cpu_core->Reset();
+			ramWipeDetector.Restart(timekeeper.totalCyclesCount);
 			cartridge_state.write_mode = false;
 		}
 
@@ -1157,6 +1198,30 @@ void togglePause() {
 	timekeeper.clock_mode = pausing ? CLOCKMODE_STOPPED : CLOCKMODE_NORMAL;
 	std::string title = std::string(WINDOW_TITLE) + " | " + currentRomFilePath + (pausing ? " | paused" : "");
 	SDL_SetWindowTitle(mainWindow, title.c_str());
+}
+
+// "Break on uninitialized memory reads": if such a read has been reported, stops the CPU as a
+// breakpoint does and shows the report in the debugger, opening it if it's closed.
+void stopOnUninitializedMemory() {
+	UninitializedMemory::Access access;
+	if(!UninitializedMemory::TakeReport(access)) {
+		return;
+	}
+	UninitializedMemory::message = UninitializedMemory::Describe(access);
+	printf("%s\n", UninitializedMemory::message.c_str());
+	timekeeper.clock_mode = CLOCKMODE_STOPPED;
+	cpu_core->Freeze();
+	Disassembler::Decode(MemoryReadResolve, loadedMemoryMap, cpu_core->pc, 32);
+	std::string title = std::string(WINDOW_TITLE) + " | " + currentRomFilePath + " | paused";
+	SDL_SetWindowTitle(mainWindow, title.c_str());
+	if(!toolTypeIsOpen<SteppingWindow>()) {
+		toggleSteppingWindow();
+	}
+	for(BaseWindow* window : toolWindows) {
+		if(dynamic_cast<SteppingWindow*>(window) != nullptr) {
+			window->Raise();
+		}
+	}
 }
 
 bool isToolWindow(Uint32 windowID) {
@@ -1472,6 +1537,14 @@ void refreshScreen() {
 				if(ImGui::IsItemHovered()) {
 					ImGui::SetTooltip("Fill the margins beside the screen with its rightmost column, stretched");
 				}
+				bool breakOnUninitialized = UninitializedMemory::enabled;
+				if(ImGui::MenuItem("Break on uninitialized memory reads", nullptr, &breakOnUninitialized)) {
+					UninitializedMemory::enabled = breakOnUninitialized;
+					Settings::SaveValue(MAIN_WINDOW_SETTINGS, BREAK_ON_UNINITIALIZED_KEY, breakOnUninitialized ? 1 : 0);
+				}
+				if(ImGui::IsItemHovered()) {
+					ImGui::SetTooltip("Stop in the debugger when RAM, audio RAM or graphics RAM is read before anything has written it");
+				}
 				ImGui::EndMenu();
 			}
 			ImGui::EndMainMenuBar();
@@ -1652,6 +1725,9 @@ else {
 	if(!paused) {
 #endif
 			timekeeper.actual_cycles = timekeeper.totalCyclesCount;
+			#ifndef WASM_BUILD
+			stopOnUninitializedMemory();
+			#endif
 #ifndef WASM_BUILD
 			switch(timekeeper.clock_mode) {
 				case CLOCKMODE_NORMAL:
@@ -1671,6 +1747,8 @@ else {
 					break;
 			}
 			if(intended_cycles) {
+				// It was about where the CPU stopped, which it's now leaving.
+				UninitializedMemory::message.clear();
 				if(vsyncNmiPending) {
 					cpu_core->NMI();
 					vsyncNmiPending = false;
@@ -1681,6 +1759,9 @@ else {
 			intended_cycles = timekeeper.cycles_per_vsync;
 			cpu_core->Run(intended_cycles, timekeeper.totalCyclesCount);
 #endif
+			#ifndef WASM_BUILD
+			stopOnUninitializedMemory();
+			#endif
 			timekeeper.actual_cycles = timekeeper.totalCyclesCount - timekeeper.actual_cycles;
 			if(cpu_core->illegalOpcode) {
 				printf("Hit illegal opcode %x\npc = %x\n", cpu_core->illegalOpcodeSrc, cpu_core->pc);
@@ -2009,6 +2090,7 @@ else {
 			randomize_vram();
 		}
 		cpu_core->Reset();
+		ramWipeDetector.Restart(timekeeper.totalCyclesCount);
 		cartridge_state.write_mode = false;
 		joysticks->SetHeldButtons(0);//clear paddle bits before reset
 		joysticks->Reset();
@@ -2061,6 +2143,7 @@ int main(int argC, char* argV[]) {
 	soundcard = new AudioCoprocessor();
 	cpu_core = new mos6502(MemoryRead, MemoryWrite, CPUStopped, MemorySync);
 	cpu_core->Reset();
+	ramWipeDetector.Restart(timekeeper.totalCyclesCount);
 	cartridge_state.write_mode = false;
 	blitter = new Blitter(cpu_core, &timekeeper, &system_state, vRAM_Surface);
 	randomize_memory();
@@ -2081,6 +2164,10 @@ int main(int argC, char* argV[]) {
 	int screenSidesShown;
 	if(Settings::LoadValue(MAIN_WINDOW_SETTINGS, SCREEN_SIDES_KEY, screenSidesShown)) {
 		showScreenSides = (screenSidesShown != 0);
+	}
+	int breakOnUninitialized;
+	if(Settings::LoadValue(MAIN_WINDOW_SETTINGS, BREAK_ON_UNINITIALIZED_KEY, breakOnUninitialized)) {
+		UninitializedMemory::enabled = (breakOnUninitialized != 0);
 	}
 #endif
 	mainWindow = SDL_CreateWindow(WINDOW_TITLE, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, viewport_width(display_scale), viewport_height(display_scale), SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
